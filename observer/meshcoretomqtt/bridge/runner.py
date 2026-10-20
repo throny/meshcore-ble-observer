@@ -105,6 +105,23 @@ def wait_for_system_time_sync(state: BridgeState) -> bool:
 
 def run(state: BridgeState) -> None:
     """Main orchestration: connect serial, query device, connect MQTT, read loop."""
+    stats_thread = threading.Thread(
+        target=background.stats_logging_loop,
+        args=(state,),
+        daemon=True,
+        name="Stats-Logger",
+    )
+    # Startup owns a device before MQTT can be established. Keep its resource
+    # lifetime inside the same finally as the main loop: an early return must
+    # not leave a BlueZ connection alive after this process exits.
+    try:
+        _run(state, stats_thread)
+    finally:
+        _cleanup(state, stats_thread)
+
+
+def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
+    """Run startup and packet processing within the caller's cleanup scope."""
     log_config_sources(state.config)
 
     # Connect selected transport (serial remains the backwards-compatible default).
@@ -175,14 +192,19 @@ def run(state: BridgeState) -> None:
     # Initial MQTT connection
     retry_count = 0
     max_initial_retries = 10
-    while retry_count < max_initial_retries:
+    while retry_count < max_initial_retries and not state.should_exit:
         if state.mqtt_manager.connect_all_brokers():
             break
         else:
+            if state.should_exit:
+                return
             retry_count += 1
             wait_time = min(retry_count * 2, 30)
             logger.warning(f"[MQTT] Initial connection failed. Retrying in {wait_time}s... (attempt {retry_count}/{max_initial_retries})")
             sleep(wait_time)
+
+    if state.should_exit:
+        return
 
     if retry_count >= max_initial_retries:
         logger.error("[MQTT] Failed to establish initial connection after maximum retries")
@@ -190,12 +212,6 @@ def run(state: BridgeState) -> None:
         return
 
     # Start stats logging thread
-    stats_thread = threading.Thread(
-        target=background.stats_logging_loop,
-        args=(state,),
-        daemon=True,
-        name="Stats-Logger"
-    )
     stats_thread.start()
     logger.debug("[STATS] Started statistics logging thread")
 
@@ -270,8 +286,6 @@ def run(state: BridgeState) -> None:
         logger.info("\nExiting...")
     except Exception as e:
         logger.exception(f"Unhandled error in main loop: {e}")
-    finally:
-        _cleanup(state, stats_thread)
 
 
 def _cleanup(state: BridgeState, stats_thread: threading.Thread) -> None:
