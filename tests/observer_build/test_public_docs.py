@@ -37,4 +37,4 @@ class PublicDocumentationTests(unittest.TestCase):
         self.assertIn("Any service installation, enable/start, pairing change, production configuration, and rollback", host)
         self.assertIn("Do not publish", contribution)
         self.assertIn("clean upstream", contribution)
-        self.assertIn("No PR has been submitted", contribution)
+        self.assertIn("candidate/export tools do not submit PRs", contribution)

@@ -47,5 +47,6 @@ claims distinct from experimental/unvalidated support for other boards or host
 models. Submitting, pushing, merging or publishing those PRs/releases requires a
 separate explicit decision.
 
-No PR has been submitted and no remote publication is authorized by the local
-candidate tooling.
+The candidate/export tools do not submit PRs or publish releases. Any upstream
+proposal is a separate, explicitly reviewed maintainer-facing action, not an
+automatic consequence of a green candidate build.
