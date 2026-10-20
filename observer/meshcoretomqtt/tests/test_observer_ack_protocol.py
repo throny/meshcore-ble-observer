@@ -22,7 +22,26 @@ RX = b"12:00:00 - 1/1/2026 U: RX, len=2 (type=1, route=D, payload_len=0) SNR=4 R
 
 def _firmware_source_root():
     configured = os.environ.get("OBSERVER_SOURCE")
-    return Path(configured).resolve() if configured else Path(__file__).resolve().parents[3]
+    root = Path(configured).resolve() if configured else Path(__file__).resolve().parents[3]
+    headers = ("ObserverProtocol.h", "ObserverRecordQueue.h", "ObserverTransport.h")
+    if not all((root / "src/observer" / name).is_file() for name in headers):
+        if configured:
+            raise AssertionError("OBSERVER_SOURCE must contain the exact patched firmware observer headers")
+        pytest.skip("Cross-layer checks require exact patched firmware via OBSERVER_SOURCE")
+    return root
+
+
+def test_explicit_firmware_source_requires_observer_headers(monkeypatch, tmp_path):
+    monkeypatch.setenv("OBSERVER_SOURCE", str(tmp_path))
+    with pytest.raises(AssertionError, match="OBSERVER_SOURCE"):
+        _firmware_source_root()
+
+
+def test_standalone_bridge_marks_missing_cross_layer_fixture_as_skip(monkeypatch, tmp_path):
+    monkeypatch.delenv("OBSERVER_SOURCE", raising=False)
+    monkeypatch.setitem(globals(), "__file__", str(tmp_path / "host/tests/test_wire.py"))
+    with pytest.raises(pytest.skip.Exception):
+        _firmware_source_root()
 
 
 def wire(nonce, sequence, data, offset=0, total=None):
