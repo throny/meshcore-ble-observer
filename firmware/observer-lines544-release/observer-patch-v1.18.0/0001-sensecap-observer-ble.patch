@@ -1,0 +1,3777 @@
+diff --git a/examples/simple_repeater/MyMesh.cpp b/examples/simple_repeater/MyMesh.cpp
+index 61b6c149e985247b160f8f2039923b6660ec17ff..906e9de10b7f6e2dcbfd42a9a2c52b8512cfaab2 100644
+--- a/examples/simple_repeater/MyMesh.cpp
++++ b/examples/simple_repeater/MyMesh.cpp
+@@ -1,6 +1,22 @@
+ #include "MyMesh.h"
+ #include <algorithm>
+ 
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++  #include <observer/ObserverCommand.h>
++  #include <observer/ObserverTransport.h>
++  #define OBSERVER_LOG_OUTPUT observer::logOutput()
++#else
++#define OBSERVER_LOG_OUTPUT Serial
++#endif
++
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++extern MyMesh the_mesh;
++static bool saveObserverEnabled(bool enabled) { return the_mesh.setObserverEnabled(enabled); }
++static bool saveObserverPeer(bool has_peer, const observer::PeerIdentity& identity) {
++  return the_mesh.setObserverPeer(has_peer, identity);
++}
++#endif
++
+ /* ------------------------------ Config -------------------------------- */
+ 
+ #ifndef LORA_FREQ
+@@ -469,10 +485,10 @@ const char *MyMesh::getLogDateTime() {
+ 
+ void MyMesh::logRxRaw(float snr, float rssi, const uint8_t raw[], int len) {
+ #if MESH_PACKET_LOGGING
+-  Serial.print(getLogDateTime());
+-  Serial.print(" RAW: ");
+-  mesh::Utils::printHex(Serial, raw, len);
+-  Serial.println();
++  OBSERVER_LOG_OUTPUT.print(getLogDateTime());
++  OBSERVER_LOG_OUTPUT.print(" RAW: ");
++  mesh::Utils::printHex(OBSERVER_LOG_OUTPUT, raw, len);
++  OBSERVER_LOG_OUTPUT.println();
+ #endif
+ }
+ 
+@@ -947,6 +963,11 @@ void MyMesh::begin(FILESYSTEM *fs) {
+   _fs = fs;
+   // load persisted prefs
+   _cli.loadPrefs(_fs);
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++  observer::PeerIdentity peer = observerPeer();
++  observer::transport.attachPreferences(observerEnabled(), peer, observerHasPeer());
++  observer::transport.setPreferenceCallbacks(saveObserverEnabled, saveObserverPeer);
++#endif
+   acl.load(_fs, self_id);
+   // TODO: key_store.begin();
+   region_map.load(_fs);
+@@ -1286,6 +1307,66 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
+   }
+ }
+ 
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++bool MyMesh::handleObserverCommand(char* command, char* reply) {
++  uint32_t epoch;
++  if (observer::parseCanonicalEpoch(command, epoch)) {
++    const uint32_t current = getRTCClock()->getCurrentTime();
++    if (epoch > current) {
++      getRTCClock()->setCurrentTime(epoch);
++      strcpy(reply, "OK - clock set");
++    } else {
++      strcpy(reply, "(ERR: clock cannot go backwards)");
++    }
++    return true;
++  }
++  if (observer::isAllowedReadCommand(command)) {
++    handleCommand(0, command, reply);
++    return true;
++  }
++  strcpy(reply, "ERR: observer operation not allowed");
++  return false;
++}
++
++bool MyMesh::handleUsbObserverCommand(char* command, char* reply) {
++  if (strcmp(command, "observer status") == 0) {
++    sprintf(reply, "enabled=%u enrolled=%u evicted=%lu/%lu truncated=%lu/%lu failed=%lu",
++            observerEnabled(), observerHasPeer(),
++            static_cast<unsigned long>(observer::transport.evictedRecords()),
++            static_cast<unsigned long>(observer::transport.evictedBytes()),
++            static_cast<unsigned long>(observer::transport.truncatedRecords()),
++            static_cast<unsigned long>(observer::transport.truncatedBytes()),
++            static_cast<unsigned long>(observer::transport.failedNotifications()));
++    return true;
++  }
++  if (strcmp(command, "observer enable") == 0) {
++    strcpy(reply, observer::transport.enable(true) ? "OK" : "ERR: observer persistence/init failed");
++    return true;
++  }
++  if (strcmp(command, "observer disable") == 0) {
++    strcpy(reply, observer::transport.enable(false) ? "OK" : "ERR: observer persistence failed");
++    return true;
++  }
++  if (strcmp(command, "observer enroll") == 0) {
++    strcpy(reply, observer::transport.beginEnrollment() ? "OK - pairing window open for 60s" : "ERR: USB enrollment unavailable");
++    return true;
++  }
++  if (strcmp(command, "observer enrollment close") == 0) {
++    strcpy(reply, observer::transport.closeEnrollment() ? "OK - enrollment closed" : "ERR: no enrollment window open");
++    return true;
++  }
++  if (strcmp(command, "observer enrollment status") == 0) {
++    strcpy(reply, observer::transport.enrollmentOpen() ? "open" : "closed");
++    return true;
++  }
++  if (strcmp(command, "observer revoke") == 0) {
++    strcpy(reply, observer::transport.revokePeer() ? "OK - peer revoked" : "ERR: peer revoke failed");
++    return true;
++  }
++  return false;
++}
++#endif
++
+ void MyMesh::loop() {
+ #ifdef WITH_BRIDGE
+   bridge.loop();
+diff --git a/examples/simple_repeater/MyMesh.h b/examples/simple_repeater/MyMesh.h
+index dc89325861c3d061f10986c2f1c439f67b7a3b6a..95592f71bee0eb4e6b7a22ad6f1c2db3f6be12a5 100644
+--- a/examples/simple_repeater/MyMesh.h
++++ b/examples/simple_repeater/MyMesh.h
+@@ -36,6 +36,9 @@
+ #include <helpers/RegionMap.h>
+ #include <helpers/RoutingPolicy.h>
+ #include "RateLimiter.h"
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++#include <observer/ObserverNodePrefs.h>
++#endif
+ 
+ #ifdef WITH_BRIDGE
+ extern AbstractBridge* bridge;
+@@ -84,7 +87,11 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
+   uint64_t uptime_millis;
+   unsigned long next_local_advert, next_flood_advert;
+   bool _logging;
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++  observer::ObserverNodePrefs _prefs;
++#else
+   NodePrefs _prefs;
++#endif
+   ClientACL  acl;
+   CommonCLI _cli;
+   uint8_t reply_data[MAX_PACKET_PAYLOAD];
+@@ -227,6 +234,24 @@ public:
+   void clearStats() override;
+ 
+   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++  bool handleObserverCommand(char* command, char* reply);
++  bool handleUsbObserverCommand(char* command, char* reply);
++  bool observerEnabled() const { return _prefs.observer_version_ == observer::ObserverNodePrefs::kObserverVersion && _prefs.observer_enabled == 1; }
++  bool observerHasPeer() const { return _prefs.observer_version_ == observer::ObserverNodePrefs::kObserverVersion && _prefs.observer_peer_present == 1; }
++  observer::PeerIdentity observerPeer() const {
++    observer::PeerIdentity peer{};
++    peer.type = _prefs.observer_peer_type;
++    memcpy(peer.address, _prefs.observer_peer_address, sizeof(peer.address));
++    return peer;
++  }
++  bool setObserverEnabled(bool enabled) {
++    return _prefs.persistEnabled(enabled, [this] { return _cli.savePrefs(_fs); });
++  }
++  bool setObserverPeer(bool has_peer, const observer::PeerIdentity& peer) {
++    return _prefs.persistPeer(has_peer, peer, [this] { return _cli.savePrefs(_fs); });
++  }
++#endif
+   void loop();
+ 
+ #if defined(WITH_BRIDGE)
+diff --git a/examples/simple_repeater/main.cpp b/examples/simple_repeater/main.cpp
+index d475b13d842ff6f335636c84c9110c8d05b4c1a2..133580cbbab1ef373beb7e8293294899431797a9 100644
+--- a/examples/simple_repeater/main.cpp
++++ b/examples/simple_repeater/main.cpp
+@@ -3,6 +3,11 @@
+ 
+ #include "MyMesh.h"
+ 
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++  #include <observer/ObserverTransport.h>
++  #include <observer/ObserverNodePrefs.h>
++#endif
++
+ #ifdef DISPLAY_CLASS
+   #include "UITask.h"
+   static UITask ui_task(board, display);
+@@ -123,6 +128,18 @@ void setup() {
+ }
+ 
+ void loop() {
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++  observer::transport.service();
++  char observer_command[observer::Transport::kCommandBytes];
++  if (observer::transport.takeCommand(observer_command, sizeof(observer_command))) {
++    char reply[160] = {};
++    the_mesh.handleObserverCommand(observer_command, reply);
++    if (reply[0]) {
++      observer::logOutput().print(reply);
++      observer::logOutput().print("\r\n");
++    }
++  }
++#endif
+   // Handle Serial CLI
+   int len = strlen(command);
+   // `command` must stay NUL-terminated within its bounds. If it ever isn't,
+@@ -156,7 +173,10 @@ void loop() {
+       the_mesh.handleCommand(0, command, reply);
+     }
+ #else
+-    the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
++    #if defined(SENSECAP_OBSERVER_TRANSPORT)
++    if (!the_mesh.handleUsbObserverCommand(command, reply))
++  #endif
++      the_mesh.handleCommand(0, command, reply);  // NOTE: there is no sender_timestamp via serial!
+ #endif
+     if (reply[0]) {
+       Serial.print("  -> "); Serial.println(reply);
+diff --git a/src/Dispatcher.cpp b/src/Dispatcher.cpp
+index c0610b7f8a7238353dc6b05aee217dfaa0cd23ea..70e3ed86315cf0ff9b67c6f06bdfb03bbd35f69a 100644
+--- a/src/Dispatcher.cpp
++++ b/src/Dispatcher.cpp
+@@ -2,6 +2,12 @@
+ 
+ #if MESH_PACKET_LOGGING
+   #include <Arduino.h>
++  #if defined(SENSECAP_OBSERVER_TRANSPORT)
++    #include <observer/ObserverTransport.h>
++    #define OBSERVER_LOG_OUTPUT observer::logOutput()
++  #else
++    #define OBSERVER_LOG_OUTPUT Serial
++  #endif
+ #endif
+ 
+ #include <math.h>
+@@ -218,21 +224,21 @@ void Dispatcher::checkRecv() {
+   }
+   if (pkt) {
+     #if MESH_PACKET_LOGGING
+-    Serial.print(getLogDateTime());
+-    Serial.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d time=%d", 
++    OBSERVER_LOG_OUTPUT.print(getLogDateTime());
++    OBSERVER_LOG_OUTPUT.printf(": RX, len=%d (type=%d, route=%s, payload_len=%d) SNR=%d RSSI=%d score=%d time=%d",
+             pkt->getRawLength(), pkt->getPayloadType(), pkt->isRouteDirect() ? "D" : "F", pkt->payload_len,
+             (int)pkt->getSNR(), (int)_radio->getLastRSSI(), (int)(score*1000), air_time);
+ 
+     static uint8_t packet_hash[MAX_HASH_SIZE];
+     pkt->calculatePacketHash(packet_hash);
+-    Serial.print(" hash=");
+-    mesh::Utils::printHex(Serial, packet_hash, MAX_HASH_SIZE);
++    OBSERVER_LOG_OUTPUT.print(" hash=");
++    mesh::Utils::printHex(OBSERVER_LOG_OUTPUT, packet_hash, MAX_HASH_SIZE);
+ 
+     if (pkt->getPayloadType() == PAYLOAD_TYPE_PATH || pkt->getPayloadType() == PAYLOAD_TYPE_REQ
+         || pkt->getPayloadType() == PAYLOAD_TYPE_RESPONSE || pkt->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
+-      Serial.printf(" [%02X -> %02X]\n", (uint32_t)pkt->payload[1], (uint32_t)pkt->payload[0]);
++      OBSERVER_LOG_OUTPUT.printf(" [%02X -> %02X]\n", (uint32_t)pkt->payload[1], (uint32_t)pkt->payload[0]);
+     } else {
+-      Serial.printf("\n");
++      OBSERVER_LOG_OUTPUT.printf("\n");
+     }
+     #endif
+     logRx(pkt, pkt->getRawLength(), score);   // hook for custom logging
+@@ -339,14 +345,14 @@ void Dispatcher::checkSend() {
+       outbound_expiry = futureMillis(max_airtime);
+ 
+     #if MESH_PACKET_LOGGING
+-      Serial.print(getLogDateTime());
+-      Serial.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)", 
++      OBSERVER_LOG_OUTPUT.print(getLogDateTime());
++      OBSERVER_LOG_OUTPUT.printf(": TX, len=%d (type=%d, route=%s, payload_len=%d)",
+             len, outbound->getPayloadType(), outbound->isRouteDirect() ? "D" : "F", outbound->payload_len);
+       if (outbound->getPayloadType() == PAYLOAD_TYPE_PATH || outbound->getPayloadType() == PAYLOAD_TYPE_REQ
+         || outbound->getPayloadType() == PAYLOAD_TYPE_RESPONSE || outbound->getPayloadType() == PAYLOAD_TYPE_TXT_MSG) {
+-        Serial.printf(" [%02X -> %02X]\n", (uint32_t)outbound->payload[1], (uint32_t)outbound->payload[0]);
++        OBSERVER_LOG_OUTPUT.printf(" [%02X -> %02X]\n", (uint32_t)outbound->payload[1], (uint32_t)outbound->payload[0]);
+       } else {
+-        Serial.printf("\n");
++        OBSERVER_LOG_OUTPUT.printf("\n");
+       }
+     #endif
+     }
+@@ -387,4 +393,4 @@ unsigned long Dispatcher::futureMillis(int millis_from_now) const {
+   return _ms->getMillis() + millis_from_now;
+ }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/src/observer/ObserverAckIngress.h b/src/observer/ObserverAckIngress.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..a2496a75945fa4618fddaadb5fb194019a2e858f
+--- /dev/null
++++ b/src/observer/ObserverAckIngress.h
+@@ -0,0 +1,44 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "ObserverProtocol.h"
++
++namespace observer {
++
++// One pending ACK is sufficient for stop-and-wait. A second write is rejected
++// until the main loop drains the slot; it can never overwrite a host command.
++class AckIngress {
++ public:
++  static constexpr size_t kCapacity = 95;
++
++  bool submit(const char* bytes, size_t length) {
++    Ack parsed{};
++    if (!bytes || length == 0 || length >= kCapacity ||
++        __atomic_load_n(&length_, __ATOMIC_ACQUIRE) != 0 ||
++        !parseAck(bytes, length, parsed)) return false;
++    memcpy(bytes_, bytes, length);
++    bytes_[length] = 0;
++    __atomic_store_n(&length_, length, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  bool take(char* destination, size_t capacity, size_t& length) {
++    const size_t pending = __atomic_load_n(&length_, __ATOMIC_ACQUIRE);
++    if (!destination || capacity <= pending || pending == 0) return false;
++    length = pending;
++    memcpy(destination, bytes_, pending + 1);
++    __atomic_store_n(&length_, 0, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  void clear() { __atomic_store_n(&length_, 0, __ATOMIC_RELEASE); }
++
++ private:
++  char bytes_[kCapacity]{};
++  size_t length_ = 0;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverCallbackState.h b/src/observer/ObserverCallbackState.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f23399e283665d52ab20cd679a5ab716467739b
+--- /dev/null
++++ b/src/observer/ObserverCallbackState.h
+@@ -0,0 +1,83 @@
++#pragma once
++
++#include <stdint.h>
++
++namespace observer {
++
++// One-slot atomic handoff. Callback tasks publish; the Arduino loop consumes.
++class CallbackEvents {
++ public:
++  bool postConnect(uint16_t handle) { return publish(connect_handle_, connect_state_, handle); }
++  bool postDisconnect(uint16_t handle) { return publish(disconnect_handle_, disconnect_state_, handle); }
++  bool postSecured(uint16_t handle) { return publish(secured_handle_, secured_state_, handle); }
++  bool postPairComplete(uint16_t handle, uint8_t status) {
++    if (!claim(pair_state_)) return false;
++    __atomic_store_n(&pair_handle_, handle, __ATOMIC_RELAXED);
++    __atomic_store_n(&pair_status_, status, __ATOMIC_RELAXED);
++    __atomic_store_n(&pair_state_, kReady, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  bool takeConnect(uint16_t& handle) { return take(connect_handle_, connect_state_, handle); }
++  bool takeDisconnect(uint16_t& handle) { return take(disconnect_handle_, disconnect_state_, handle); }
++  bool takeSecured(uint16_t& handle) { return take(secured_handle_, secured_state_, handle); }
++  bool takePairComplete(uint16_t& handle, uint8_t& status) {
++    if (!claimReady(pair_state_)) return false;
++    handle = __atomic_load_n(&pair_handle_, __ATOMIC_RELAXED);
++    status = __atomic_load_n(&pair_status_, __ATOMIC_RELAXED);
++    __atomic_store_n(&pair_state_, kEmpty, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  bool pending() const {
++    return __atomic_load_n(&connect_state_, __ATOMIC_ACQUIRE) != kEmpty ||
++           __atomic_load_n(&disconnect_state_, __ATOMIC_ACQUIRE) != kEmpty ||
++           __atomic_load_n(&secured_state_, __ATOMIC_ACQUIRE) != kEmpty ||
++           __atomic_load_n(&pair_state_, __ATOMIC_ACQUIRE) != kEmpty;
++  }
++  bool safeToReleaseQueue(bool enabled, uint16_t active_handle) const {
++    return !enabled && active_handle == kInvalidHandle && !pending();
++  }
++  bool safeToReleaseQueue(bool enabled, uint16_t active_handle, bool admission_pending) const {
++    return !enabled && active_handle == kInvalidHandle && !pending() && !admission_pending;
++  }
++
++ private:
++  static constexpr uint8_t kEmpty = 0;
++  static constexpr uint8_t kWriting = 1;
++  static constexpr uint8_t kReady = 2;
++  static constexpr uint16_t kInvalidHandle = 0xFFFF;
++
++  static bool claim(volatile uint8_t& state) {
++    uint8_t expected = kEmpty;
++    return __atomic_compare_exchange_n(&state, &expected, kWriting, false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
++  }
++  static bool claimReady(volatile uint8_t& state) {
++    uint8_t expected = kReady;
++    return __atomic_compare_exchange_n(&state, &expected, kWriting, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
++  }
++  static bool publish(volatile uint16_t& slot, volatile uint8_t& state, uint16_t handle) {
++    if (!claim(state)) return false;
++    __atomic_store_n(&slot, handle, __ATOMIC_RELAXED);
++    __atomic_store_n(&state, kReady, __ATOMIC_RELEASE);
++    return true;
++  }
++  static bool take(volatile uint16_t& slot, volatile uint8_t& state, uint16_t& handle) {
++    if (!claimReady(state)) return false;
++    handle = __atomic_load_n(&slot, __ATOMIC_RELAXED);
++    __atomic_store_n(&state, kEmpty, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  volatile uint16_t connect_handle_ = kInvalidHandle;
++  volatile uint16_t disconnect_handle_ = kInvalidHandle;
++  volatile uint16_t secured_handle_ = kInvalidHandle;
++  volatile uint16_t pair_handle_ = kInvalidHandle;
++  volatile uint8_t pair_status_ = 0;
++  volatile uint8_t connect_state_ = kEmpty;
++  volatile uint8_t disconnect_state_ = kEmpty;
++  volatile uint8_t secured_state_ = kEmpty;
++  volatile uint8_t pair_state_ = kEmpty;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverCommand.h b/src/observer/ObserverCommand.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f17f75f29b2d3dc3aff6e771166a08c1a50b3c59
+--- /dev/null
++++ b/src/observer/ObserverCommand.h
+@@ -0,0 +1,32 @@
++#pragma once
++
++#include <stdint.h>
++#include <string.h>
++
++namespace observer {
++
++inline bool parseCanonicalEpoch(const char* command, uint32_t& epoch) {
++  if (strncmp(command, "time ", 5) != 0 || command[5] == 0) return false;
++  const char* digits = command + 5;
++  if (digits[0] == '0' && digits[1] != 0) return false;
++  uint64_t parsed = 0;
++  for (const char* current = digits; *current; ++current) {
++    if (*current < '0' || *current > '9') return false;
++    parsed = parsed * 10 + static_cast<uint8_t>(*current - '0');
++    if (parsed > UINT32_MAX) return false;
++  }
++  epoch = static_cast<uint32_t>(parsed);
++  return true;
++}
++
++inline bool isAllowedReadCommand(const char* command) {
++  static const char* const allowed[] = {
++      "get name", "get public.key", "get prv.key", "get radio", "ver", "board",
++      "stats-core", "stats-radio", "stats-packets"};
++  for (const char* candidate : allowed) {
++    if (strcmp(command, candidate) == 0) return true;
++  }
++  return false;
++}
++
++}  // namespace observer
+diff --git a/src/observer/ObserverCommandIngress.h b/src/observer/ObserverCommandIngress.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..565be7befb92833a73f24d770f5c13117a44dfbc
+--- /dev/null
++++ b/src/observer/ObserverCommandIngress.h
+@@ -0,0 +1,37 @@
++#pragma once
++
++#include <stddef.h>
++#include <string.h>
++
++namespace observer {
++
++// Independent one-entry host command slot; ACK traffic has its own slot.
++class CommandIngress {
++ public:
++  static constexpr size_t kCapacity = 96;
++
++  bool submitCommand(const char* bytes, size_t length) {
++    if (!bytes || length == 0 || length >= kCapacity || memchr(bytes, 0, length) ||
++        __atomic_load_n(&length_, __ATOMIC_ACQUIRE) != 0) return false;
++    memcpy(bytes_, bytes, length);
++    bytes_[length] = 0;
++    __atomic_store_n(&length_, length, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  bool takeCommand(char* destination, size_t capacity) {
++    const size_t pending = __atomic_load_n(&length_, __ATOMIC_ACQUIRE);
++    if (!destination || pending == 0 || capacity <= pending) return false;
++    memcpy(destination, bytes_, pending + 1);
++    __atomic_store_n(&length_, 0, __ATOMIC_RELEASE);
++    return true;
++  }
++
++  void clear() { __atomic_store_n(&length_, 0, __ATOMIC_RELEASE); }
++
++ private:
++  char bytes_[kCapacity]{};
++  size_t length_ = 0;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverConnectionAdmission.h b/src/observer/ObserverConnectionAdmission.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d62b90d910bdd00eb5c595357f8e80855c77dd2
+--- /dev/null
++++ b/src/observer/ObserverConnectionAdmission.h
+@@ -0,0 +1,69 @@
++#pragma once
++
++#include <stdint.h>
++
++#include "ObserverPolicy.h"
++
++namespace observer {
++
++// Stable public/static addresses are directly comparable at connection time;
++// resolved RPAs carry the identity address according to S140, while unresolved
++// private addresses must wait for the secured bond identity under the timeout.
++inline bool identityKnownAtConnect(bool bonded, uint8_t address_type, uint8_t address_id_peer) {
++  return bonded || address_id_peer != 0 || address_type == 0 || address_type == 1;
++}
++
++inline bool hasLiveConnection(bool connection_exists, bool connected) {
++  return connection_exists && connected;
++}
++
++// Decides whether a freshly connected handle may occupy the single peripheral slot.
++inline bool admitsCandidate(bool enabled, bool slot_free, bool link_connected,
++                            bool enrolling, bool enrollment_slot_free,
++                            bool has_pinned, bool identity_known,
++                            const PeerIdentity& observed, const PeerIdentity& pinned) {
++  if (!enabled || !slot_free || !link_connected) return false;
++  if (enrolling) return enrollment_slot_free;
++  if (!has_pinned) return false;
++  if (identity_known) return samePeer(observed, pinned);
++  return true;
++}
++
++class ConnectionAdmission {
++ public:
++  explicit ConnectionAdmission(uint32_t timeout_ms) : timeout_ms_(timeout_ms) {}
++  bool connected(uint16_t handle, uint32_t now) {
++    if (handle_ != kInvalidHandle) return false;
++    handle_ = handle;
++    connected_at_ = now;
++    authorized_ = false;
++    return true;
++  }
++  bool authorize(uint16_t handle, const PeerIdentity& peer, const PeerIdentity& intended) {
++    if (handle != handle_ || !samePeer(peer, intended)) return false;
++    authorized_ = true;
++    return true;
++  }
++  bool expired(uint32_t now) const {
++    return handle_ != kInvalidHandle && !authorized_ &&
++           static_cast<uint32_t>(now - connected_at_) >= timeout_ms_;
++  }
++  bool takeDisconnect(uint32_t now, uint16_t& handle) {
++    if (!expired(now)) return false;
++    handle = handle_;
++    reset();
++    return true;
++  }
++  void disconnected(uint16_t handle) { if (handle_ == handle) reset(); }
++  bool authorized() const { return authorized_; }
++  bool pending() const { return handle_ != kInvalidHandle && !authorized_; }
++ private:
++  static constexpr uint16_t kInvalidHandle = 0xFFFF;
++  void reset() { handle_ = kInvalidHandle; connected_at_ = 0; authorized_ = false; }
++  uint32_t timeout_ms_;
++  uint32_t connected_at_ = 0;
++  uint16_t handle_ = kInvalidHandle;
++  bool authorized_ = false;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverDelivery.h b/src/observer/ObserverDelivery.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b557303c3eb1092e82c9de7a3557809ff6c8d152
+--- /dev/null
++++ b/src/observer/ObserverDelivery.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++#include <stdint.h>
++
++namespace observer {
++
++// Nonblocking stop-and-wait timing state, independent of BLE/Arduino.
++class DeliverySchedule {
++ public:
++  explicit DeliverySchedule(uint32_t retry_interval_ms, uint32_t fragment_interval_ms = 10)
++      : retry_interval_ms_(retry_interval_ms), fragment_interval_ms_(fragment_interval_ms) {}
++
++  bool maySend(uint32_t now) const {
++    return !waiting_ || static_cast<uint32_t>(now - last_attempt_) >=
++                            (complete_ ? retry_interval_ms_ : fragment_interval_ms_);
++  }
++
++  void attempted(uint32_t now) {
++    last_attempt_ = now;
++    waiting_ = true;
++  }
++
++  void fragmentSent(bool record_complete) {
++    if (record_complete) complete_ = true;
++  }
++
++  bool restartWholeRecord() {
++    if (!complete_) return false;
++    complete_ = false;
++    return true;
++  }
++
++  void fragmentFailed() { complete_ = false; }
++  void disconnected() { waiting_ = false; complete_ = false; }
++  void acknowledged() { waiting_ = false; complete_ = false; }
++
++ private:
++  uint32_t retry_interval_ms_;
++  uint32_t fragment_interval_ms_;
++  uint32_t last_attempt_ = 0;
++  bool waiting_ = false;
++  bool complete_ = false;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverLineBuffer.h b/src/observer/ObserverLineBuffer.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..271fa618a63bbf08225a3a6a9d4270a0519caa94
+--- /dev/null
++++ b/src/observer/ObserverLineBuffer.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace observer {
++
++template <size_t LineCapacity, size_t QueueCapacity, typename Queue = StreamQueue<QueueCapacity>,
++          typename OverflowReporter = Queue>
++class LineBuffer {
++ public:
++  explicit LineBuffer(Queue& queue)
++      : queue_(queue), overflow_reporter_(nullptr) {}
++  LineBuffer(Queue& queue, OverflowReporter& overflow_reporter)
++      : queue_(queue), overflow_reporter_(&overflow_reporter) {}
++
++  size_t write(const uint8_t* bytes, size_t length) {
++    for (size_t index = 0; index < length; ++index) write(bytes[index]);
++    return length;
++  }
++
++  size_t write(uint8_t byte) {
++    // The byte that exceeds capacity can itself be the terminator. Process it
++    // in the discard state immediately, not as the start of another lost line.
++    if (line_length_ == LineCapacity) overflowed_ = true;
++    if (overflowed_) {
++      if (byte == '\n') {
++        if (overflow_reporter_) overflow_reporter_->drop(line_length_ + 1);
++        else queue_.drop(line_length_ + 1);
++        line_length_ = 0;
++        overflowed_ = false;
++      } else {
++        ++line_length_;
++      }
++      return 1;
++    }
++    line_[line_length_++] = byte;
++    if (byte == '\n') commitLine();
++    return 1;
++  }
++
++  void reset() {
++    line_length_ = 0;
++    overflowed_ = false;
++  }
++
++ private:
++  void commitLine() {
++    queue_.enqueue(line_, line_length_);
++    line_length_ = 0;
++  }
++
++  Queue& queue_;
++  OverflowReporter* overflow_reporter_;
++  uint8_t line_[LineCapacity]{};
++  size_t line_length_ = 0;
++  bool overflowed_ = false;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverNodePrefs.h b/src/observer/ObserverNodePrefs.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1ef0d311b63f27df704b55a32072c765a435067
+--- /dev/null
++++ b/src/observer/ObserverNodePrefs.h
+@@ -0,0 +1,76 @@
++#pragma once
++
++#include <helpers/CommonCLI.h>
++#include "ObserverPolicy.h"
++
++namespace observer {
++
++class ObserverNodePrefs : public NodePrefs {
++ public:
++  static constexpr uint8_t kObserverVersion = 1;
++  uint8_t observer_enabled = 0;
++  uint8_t observer_peer_present = 0;
++  uint8_t observer_peer_type = 0;
++  uint8_t observer_peer_address[6]{};
++  uint8_t observer_version_ = 0;
++
++ protected:
++  void structure() override {
++    NodePrefs::structure();
++    def("observer_v", observer_version_);
++    def("observer_en", observer_enabled);
++    def("observer_peer_on", observer_peer_present);
++    def("observer_peer_type", observer_peer_type);
++    def("observer_peer_addr", observer_peer_address, sizeof(observer_peer_address));
++  }
++
++ public:
++  template <typename Save>
++  bool persistEnabled(bool enabled, Save save) {
++    const uint8_t previous_enabled = observer_enabled;
++    const uint8_t previous_version = observer_version_;
++    const uint8_t previous_peer_present = observer_peer_present;
++    const uint8_t previous_peer_type = observer_peer_type;
++    uint8_t previous_peer_address[sizeof(observer_peer_address)];
++    memcpy(previous_peer_address, observer_peer_address, sizeof(previous_peer_address));
++
++    observer_version_ = kObserverVersion;
++    observer_enabled = enabled ? 1 : 0;
++    if (previous_version != kObserverVersion) {
++      observer_peer_present = 0;
++      observer_peer_type = 0;
++      memset(observer_peer_address, 0, sizeof(observer_peer_address));
++    }
++    if (save()) return true;
++    observer_enabled = previous_enabled;
++    observer_version_ = previous_version;
++    observer_peer_present = previous_peer_present;
++    observer_peer_type = previous_peer_type;
++    memcpy(observer_peer_address, previous_peer_address, sizeof(previous_peer_address));
++    return false;
++  }
++
++  template <typename Save>
++  bool persistPeer(bool has_peer, const PeerIdentity& peer, Save save) {
++    const uint8_t previous_present = observer_peer_present;
++    const uint8_t previous_version = observer_version_;
++    const uint8_t previous_enabled = observer_enabled;
++    const uint8_t previous_type = observer_peer_type;
++    uint8_t previous_address[sizeof(observer_peer_address)];
++    memcpy(previous_address, observer_peer_address, sizeof(previous_address));
++
++    observer_version_ = kObserverVersion;
++    observer_peer_present = has_peer ? 1 : 0;
++    observer_peer_type = peer.type;
++    memcpy(observer_peer_address, peer.address, sizeof(peer.address));
++    if (save()) return true;
++    observer_peer_present = previous_present;
++    observer_version_ = previous_version;
++    observer_enabled = previous_enabled;
++    observer_peer_type = previous_type;
++    memcpy(observer_peer_address, previous_address, sizeof(previous_address));
++    return false;
++  }
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverPolicy.h b/src/observer/ObserverPolicy.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e8ffc596e8b1645ab3f3d7180b042e932c7439d
+--- /dev/null
++++ b/src/observer/ObserverPolicy.h
+@@ -0,0 +1,77 @@
++#pragma once
++
++#include <stdint.h>
++#include <string.h>
++
++namespace observer {
++
++struct PeerIdentity {
++  uint8_t type = 0;
++  uint8_t address[6]{};
++};
++
++inline bool samePeer(const PeerIdentity& left, const PeerIdentity& right) {
++  return left.type == right.type && memcmp(left.address, right.address, sizeof(left.address)) == 0;
++}
++
++class Policy {
++ public:
++  Policy(bool enabled = false, const PeerIdentity& peer = PeerIdentity{}, bool has_peer = false)
++      : enabled_(enabled), peer_(peer), has_peer_(has_peer) {}
++
++  bool enabled() const { return enabled_; }
++  void setEnabled(bool enabled) { enabled_ = enabled; }
++  bool hasPeer() const { return has_peer_; }
++  const PeerIdentity& peer() const { return peer_; }
++
++  void openEnrollment(uint32_t now, uint32_t duration_ms) {
++    if (duration_ms == 0 || duration_ms > kMaximumEnrollmentMs || has_peer_) return;
++    enrollment_started_ = now;
++    enrollment_duration_ = duration_ms;
++    enrollment_open_ = true;
++  }
++
++  void closeEnrollment() { enrollment_open_ = false; }
++
++  bool enrollmentOpen(uint32_t now) const {
++    return enrollment_open_ && static_cast<uint32_t>(now - enrollment_started_) < enrollment_duration_;
++  }
++
++  bool enroll(const PeerIdentity& peer, uint32_t now) {
++    if (!enabled_ || !enrollmentOpen(now) || has_peer_) return false;
++    peer_ = peer;
++    has_peer_ = true;
++    enrollment_open_ = false;
++    return true;
++  }
++
++  bool restorePeer(const PeerIdentity& peer) {
++    peer_ = peer;
++    has_peer_ = true;
++    return true;
++  }
++
++  bool authorizes(bool connected, const PeerIdentity& peer, uint32_t now = 0) const {
++    return enabled_ && has_peer_ && connected && !enrollmentOpen(now) &&
++           peer.type == peer_.type &&
++           memcmp(peer.address, peer_.address, sizeof(peer.address)) == 0;
++  }
++
++  void revoke() {
++    has_peer_ = false;
++    memset(&peer_, 0, sizeof(peer_));
++    closeEnrollment();
++  }
++
++  static constexpr uint32_t kMaximumEnrollmentMs = 60000;
++
++ private:
++  bool enabled_ = false;
++  PeerIdentity peer_{};
++  bool has_peer_ = false;
++  bool enrollment_open_ = false;
++  uint32_t enrollment_started_ = 0;
++  uint32_t enrollment_duration_ = 0;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverPreference.h b/src/observer/ObserverPreference.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9146eb23cdcea096067cd199db3662f054d5a61
+--- /dev/null
++++ b/src/observer/ObserverPreference.h
+@@ -0,0 +1,61 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "ObserverPolicy.h"
++
++namespace observer {
++
++struct PreferenceStore {
++  virtual ~PreferenceStore() = default;
++  virtual bool read(const char* key, uint8_t* output, size_t length) = 0;
++  virtual bool write(const char* key, const uint8_t* value, size_t length) = 0;
++  virtual bool remove(const char* key) = 0;
++};
++
++class Preferences {
++ public:
++  explicit Preferences(PreferenceStore& store) : store_(store) {}
++
++  bool load(bool& enabled, PeerIdentity& peer, bool& has_peer) {
++    enabled = false;
++    has_peer = false;
++    uint8_t version = 0;
++    if (!store_.read("observer_v", &version, 1)) return true;
++    if (version != kVersion) return false;
++    uint8_t enabled_byte = 0;
++    if (store_.read("observer_en", &enabled_byte, 1)) enabled = enabled_byte == 1;
++    uint8_t identity[7]{};
++    if (store_.read("observer_peer", identity, sizeof(identity))) {
++      peer.type = identity[0];
++      memcpy(peer.address, identity + 1, 6);
++      has_peer = true;
++    }
++    return true;
++  }
++
++  bool saveEnabled(bool enabled) {
++    const uint8_t version = kVersion;
++    const uint8_t value = enabled ? 1 : 0;
++    return store_.write("observer_v", &version, 1) && store_.write("observer_en", &value, 1);
++  }
++
++  bool savePeer(bool has_peer, const PeerIdentity& peer) {
++    const uint8_t version = kVersion;
++    if (!store_.write("observer_v", &version, 1)) return false;
++    if (!has_peer) return store_.remove("observer_peer");
++    uint8_t identity[7]{};
++    identity[0] = peer.type;
++    memcpy(identity + 1, peer.address, 6);
++    return store_.write("observer_peer", identity, sizeof(identity));
++  }
++
++  static constexpr uint8_t kVersion = 1;
++
++ private:
++  PreferenceStore& store_;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverProtocol.h b/src/observer/ObserverProtocol.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..44a8eeda556b9f250eb90857ddb10eb75dd47170
+--- /dev/null
++++ b/src/observer/ObserverProtocol.h
+@@ -0,0 +1,74 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <string.h>
++
++namespace observer {
++
++constexpr size_t kFrameHeaderBytes = 16;
++constexpr size_t kMaximumRecordBytes = 256;
++constexpr size_t kMaximumAckBytes = 95;
++
++struct Ack {
++  uint64_t boot_nonce = 0;
++  uint32_t sequence = 0;
++};
++
++inline size_t encodeFrame(uint64_t boot_nonce, uint32_t sequence, uint16_t total_length,
++                          uint16_t offset, const uint8_t* bytes, size_t length,
++                          uint8_t* output, size_t capacity) {
++  if (!output || !bytes || sequence == 0 || total_length == 0 || total_length > kMaximumRecordBytes ||
++      offset > total_length || length == 0 || length > total_length - offset ||
++      length + kFrameHeaderBytes > capacity) return 0;
++  for (unsigned index = 0; index < 8; ++index) output[index] = static_cast<uint8_t>(boot_nonce >> (index * 8));
++  for (unsigned index = 0; index < 4; ++index) output[8 + index] = static_cast<uint8_t>(sequence >> (index * 8));
++  output[12] = static_cast<uint8_t>(total_length);
++  output[13] = static_cast<uint8_t>(total_length >> 8);
++  output[14] = static_cast<uint8_t>(offset);
++  output[15] = static_cast<uint8_t>(offset >> 8);
++  memcpy(output + kFrameHeaderBytes, bytes, length);
++  return kFrameHeaderBytes + length;
++}
++
++inline bool formatAck(uint64_t boot_nonce, uint32_t sequence, char* output, size_t capacity) {
++  if (!output || capacity < 31 || sequence == 0) return false;
++  const int length = snprintf(output, capacity, "ack %016llx %u",
++                              static_cast<unsigned long long>(boot_nonce), sequence);
++  return length > 0 && static_cast<size_t>(length) < capacity;
++}
++
++inline bool parseAck(const char* bytes, size_t length, Ack& ack) {
++  constexpr char prefix[] = "ack ";
++  if (!bytes || length >= kMaximumAckBytes || length < sizeof(prefix) - 1 + 16 + 2 ||
++      memcmp(bytes, prefix, sizeof(prefix) - 1) != 0) return false;
++  const size_t nonce_start = sizeof(prefix) - 1;
++  for (size_t index = 0; index < 16; ++index) {
++    const char c = bytes[nonce_start + index];
++    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
++  }
++  const size_t separator = nonce_start + 16;
++  if (bytes[separator] != ' ') return false;
++  uint64_t nonce = 0;
++  for (size_t index = 0; index < 16; ++index) {
++    const char c = bytes[nonce_start + index];
++    nonce = (nonce << 4) | static_cast<uint64_t>(c <= '9' ? c - '0' : c - 'a' + 10);
++  }
++  const size_t sequence_start = separator + 1;
++  if (sequence_start == length || (bytes[sequence_start] == '0' && sequence_start + 1 != length)) return false;
++  uint32_t sequence = 0;
++  for (size_t index = sequence_start; index < length; ++index) {
++    const char c = bytes[index];
++    if (c < '0' || c > '9') return false;
++    const uint32_t digit = static_cast<uint32_t>(c - '0');
++    if (sequence > (UINT32_MAX - digit) / 10) return false;
++    sequence = sequence * 10 + digit;
++  }
++  if (sequence == 0) return false;
++  ack.boot_nonce = nonce;
++  ack.sequence = sequence;
++  return true;
++}
++
++}  // namespace observer
+diff --git a/src/observer/ObserverRecordQueue.h b/src/observer/ObserverRecordQueue.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe244b1659c85bc9151900a1cfc4e8ef538a53ff
+--- /dev/null
++++ b/src/observer/ObserverRecordQueue.h
+@@ -0,0 +1,238 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace observer {
++
++class QueueSequenceState {
++ public:
++  uint32_t next() const { return next_; }
++  void advance(uint32_t assigned) {
++    next_ = assigned + 1;
++  }
++  void restart() { next_ = 1; }
++  void skip() { if (next_ != 0) advance(next_); }
++ private:
++  uint32_t next_ = 1;
++};
++
++struct RecordFragment {
++  uint64_t boot_nonce;
++  uint32_t sequence;
++  uint16_t total_length;
++  uint16_t offset;
++  const uint8_t* bytes;
++  uint16_t length;
++};
++
++template <size_t ByteCapacity, size_t RecordCapacity>
++class RecordQueue {
++ public:
++  explicit RecordQueue(bool enabled = true, uint64_t boot_nonce = 0, uint32_t next_sequence = 1)
++      : enabled_(enabled), boot_nonce_(boot_nonce), next_sequence_(next_sequence ? next_sequence : 1) {}
++  RecordQueue(bool enabled, uint64_t boot_nonce, QueueSequenceState& sequence)
++      : enabled_(enabled), boot_nonce_(boot_nonce), next_sequence_(sequence.next()), sequence_(&sequence) {}
++
++  bool enqueue(const uint8_t* bytes, size_t length) {
++    if (!enabled_) return true;
++    if (!bytes || length == 0 || length > kMaxRecordLength) {
++      drop(length);
++      return false;
++    }
++    // Zero means exhausted, not reusable sequence 1. Only the loop-side nonce
++    // rotation can reopen admission; do not evict backlog while entropy waits.
++    if (sequenceExhausted()) {
++      rejectUnavailable(length);
++      return false;
++    }
++    while (length > availableBytes() || record_count_ == RecordCapacity) {
++      if (record_count_ == 0) {
++        drop(length);
++        return false;
++      }
++      dropHeadRecord();
++    }
++    if (length > availableBytes() || record_count_ == RecordCapacity) {
++      drop(length);
++      return false;
++    }
++    if (byte_count_ == 0) byte_tail_ = byte_head_;
++    const bool was_empty = record_count_ == 0;
++    Record& record = records_[record_tail_];
++    record.boot_nonce = boot_nonce_;
++    record.sequence = next_sequence_++;
++    if (sequence_) sequence_->advance(record.sequence);
++    record.start = byte_tail_;
++    record.length = length;
++    record.consumed = 0;
++    record.transmit_offset = 0;
++    for (size_t index = 0; index < length; ++index) {
++      bytes_[byte_tail_] = bytes[index];
++      byte_tail_ = (byte_tail_ + 1) % ByteCapacity;
++    }
++    byte_count_ += length;
++    if (was_empty) byte_head_ = record.start;
++    record_tail_ = (record_tail_ + 1) % RecordCapacity;
++    ++record_count_;
++    return true;
++  }
++
++  bool sequenceExhausted() const { return next_sequence_ == 0; }
++  bool setBootNonce(uint64_t boot_nonce) {
++    if (!sequenceExhausted() || boot_nonce == 0 || boot_nonce == boot_nonce_) return false;
++    boot_nonce_ = boot_nonce;
++    next_sequence_ = 1;
++    if (sequence_) sequence_->restart();
++    return true;
++  }
++
++  bool peek(RecordFragment& fragment, size_t maximum) const {
++    if (record_count_ == 0) return false;
++    const Record& record = records_[record_head_];
++    fragment.boot_nonce = record.boot_nonce;
++    fragment.sequence = record.sequence;
++    fragment.total_length = record.length;
++    fragment.offset = static_cast<uint16_t>(record.transmit_offset);
++    fragment.bytes = &bytes_[(record.start + record.transmit_offset) % ByteCapacity];
++    const size_t contiguous = ByteCapacity - ((record.start + record.transmit_offset) % ByteCapacity);
++    const size_t remaining = record.length - record.transmit_offset;
++    fragment.length = remaining < maximum ? remaining : maximum;
++    if (fragment.length > contiguous) fragment.length = contiguous;
++    return true;
++  }
++
++  bool consume(uint64_t boot_nonce, uint32_t sequence, size_t length) {
++    if (record_count_ == 0 || boot_nonce != records_[record_head_].boot_nonce || records_[record_head_].sequence != sequence) return false;
++    Record& record = records_[record_head_];
++    if (length > record.length - record.transmit_offset) return false;
++    record.transmit_offset += length;  // progress only; storage stays until complete Pi ACK
++    return true;
++  }
++
++  void consume(size_t length) {
++    if (record_count_ == 0) return;
++    consume(records_[record_head_].boot_nonce, records_[record_head_].sequence, length);
++  }
++
++  void dropHeadRecord() {
++    if (record_count_ == 0) return;
++    Record& record = records_[record_head_];
++    const size_t remaining = record.length;
++    ++dropped_records_;
++    dropped_bytes_ += remaining;
++    ++evicted_records_;
++    evicted_bytes_ += remaining;
++    byte_count_ -= remaining;
++    byte_head_ = (byte_head_ + remaining) % ByteCapacity;
++    if (record_count_ > 1) byte_head_ = records_[(record_head_ + 1) % RecordCapacity].start;
++    removeHead();
++  }
++
++  void drop(size_t length) {
++    if (!enabled_) return;
++    reserveLostIdentity();
++    ++dropped_records_;
++    dropped_bytes_ += length;
++    ++truncated_records_;
++    truncated_bytes_ += length;
++  }
++
++  void rejectUnavailable(size_t length) {
++    if (!enabled_) return;
++    reserveLostIdentity();
++    ++dropped_records_;
++    dropped_bytes_ += length;
++    ++unavailable_records_;
++    unavailable_bytes_ += length;
++  }
++
++  bool empty() const { return record_count_ == 0; }
++  void setEnabled(bool enabled) { enabled_ = enabled; }
++  size_t size() const { return record_count_; }
++  uint32_t headSequence() const { return record_count_ ? records_[record_head_].sequence : 0; }
++
++  bool acknowledge(uint64_t boot_nonce, uint32_t sequence) {
++    if (record_count_ == 0 || boot_nonce != records_[record_head_].boot_nonce || sequence == 0 ||
++        records_[record_head_].sequence != sequence) return false;
++    const size_t remaining = records_[record_head_].length;
++    byte_count_ -= remaining;
++    byte_head_ = (byte_head_ + remaining) % ByteCapacity;
++    if (record_count_ > 1) byte_head_ = records_[(record_head_ + 1) % RecordCapacity].start;
++    removeHead();
++    return true;
++  }
++
++  void restartHead() {
++    if (record_count_ != 0) records_[record_head_].transmit_offset = 0;
++  }
++
++  uint64_t bootNonce() const { return boot_nonce_; }
++
++  uint32_t droppedRecords() const { return dropped_records_; }
++  uint32_t droppedBytes() const { return dropped_bytes_; }
++  uint32_t evictedRecords() const { return evicted_records_; }
++  uint32_t evictedBytes() const { return evicted_bytes_; }
++  uint32_t truncatedRecords() const { return truncated_records_; }
++  uint32_t truncatedBytes() const { return truncated_bytes_; }
++  uint32_t unavailableRecords() const { return unavailable_records_; }
++  uint32_t unavailableBytes() const { return unavailable_bytes_; }
++
++ private:
++  void reserveLostIdentity() {
++    // Missing classic records occupy sequence positions too. Never wrap zero
++    // back to 1; a fresh loop-side nonce is required after exhaustion.
++    if (sequenceExhausted()) return;
++    const uint32_t lost = next_sequence_++;
++    if (sequence_) sequence_->advance(lost);
++  }
++
++  struct Record {
++    uint64_t boot_nonce;
++    uint32_t sequence;
++    size_t start;
++    size_t length;
++    size_t consumed;
++    size_t transmit_offset;
++  };
++
++  void removeHead() {
++    record_head_ = (record_head_ + 1) % RecordCapacity;
++    --record_count_;
++  }
++  size_t availableBytes() const { return ByteCapacity - byte_count_; }
++
++
++  uint8_t bytes_[ByteCapacity]{};
++  Record records_[RecordCapacity]{};
++  size_t byte_head_ = 0;
++  size_t byte_tail_ = 0;
++  size_t byte_count_ = 0;
++  size_t record_head_ = 0;
++  size_t record_tail_ = 0;
++  size_t record_count_ = 0;
++  static constexpr size_t kMaxRecordLength = 256;
++  uint64_t boot_nonce_ = 0;
++  uint32_t next_sequence_ = 1;
++  QueueSequenceState* sequence_ = nullptr;
++  bool enabled_;
++  uint32_t dropped_records_ = 0;
++  uint32_t dropped_bytes_ = 0;
++  uint32_t evicted_records_ = 0;
++  uint32_t evicted_bytes_ = 0;
++  uint32_t truncated_records_ = 0;
++  uint32_t truncated_bytes_ = 0;
++  uint32_t unavailable_records_ = 0;
++  uint32_t unavailable_bytes_ = 0;
++
++  void recomputeByteCount() {
++    size_t total = 0;
++    for (size_t index = 0; index < record_count_; ++index) {
++      const Record& record = records_[(record_head_ + index) % RecordCapacity];
++      total += record.length;
++    }
++    byte_count_ = total;
++  }
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverStatsSnapshot.h b/src/observer/ObserverStatsSnapshot.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..69beb2f479505561a065e9ce2bc7f5be6c51dfde
+--- /dev/null
++++ b/src/observer/ObserverStatsSnapshot.h
+@@ -0,0 +1,59 @@
++#pragma once
++
++#include <stdio.h>
++#include <stdint.h>
++
++namespace observer {
++
++struct StatsValues {
++  uint32_t evicted_records = 0;
++  uint32_t evicted_bytes = 0;
++  uint32_t truncated_records = 0;
++  uint32_t truncated_bytes = 0;
++  uint32_t failed_notifications = 0;
++  uint32_t unavailable_records = 0;
++  uint32_t unavailable_bytes = 0;
++};
++
++inline size_t formatStats(const StatsValues& stats, char* buffer, size_t capacity) {
++  const int length = snprintf(buffer, capacity, "evicted=%lu/%lu truncated=%lu/%lu failed=%lu unavailable=%lu/%lu",
++      static_cast<unsigned long>(stats.evicted_records), static_cast<unsigned long>(stats.evicted_bytes),
++      static_cast<unsigned long>(stats.truncated_records), static_cast<unsigned long>(stats.truncated_bytes),
++      static_cast<unsigned long>(stats.failed_notifications),
++      static_cast<unsigned long>(stats.unavailable_records), static_cast<unsigned long>(stats.unavailable_bytes));
++  return length < 0 ? 0 : static_cast<size_t>(length);
++}
++
++// Single loop-task writer, callback-task reader. The writer fills the inactive
++// buffer and then release-publishes the active index; the reader acquire-loads the
++// index and copies a buffer the writer is not touching. The reader never spins, so
++// the higher-priority BLE callback cannot livelock the loop task mid-publish.
++class StatsSnapshot {
++ public:
++  void publish(uint32_t evicted_records, uint32_t evicted_bytes,
++               uint32_t truncated_records, uint32_t truncated_bytes,
++               uint32_t failed_notifications, uint32_t unavailable_records = 0,
++               uint32_t unavailable_bytes = 0) {
++    const uint32_t active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
++    StatsValues& back = buffers_[active ^ 1U];
++    back.evicted_records = evicted_records;
++    back.evicted_bytes = evicted_bytes;
++    back.truncated_records = truncated_records;
++    back.truncated_bytes = truncated_bytes;
++    back.failed_notifications = failed_notifications;
++    back.unavailable_records = unavailable_records;
++    back.unavailable_bytes = unavailable_bytes;
++    __atomic_store_n(&active_, active ^ 1U, __ATOMIC_RELEASE);
++  }
++
++  StatsValues read() const {
++    const uint32_t active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
++    return buffers_[active];
++  }
++
++ private:
++  mutable volatile uint32_t active_ = 0;
++  StatsValues buffers_[2]{};
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverStreamQueue.h b/src/observer/ObserverStreamQueue.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..1a6bb52db5e47b7960bbc7bc218cb7eb04787206
+--- /dev/null
++++ b/src/observer/ObserverStreamQueue.h
+@@ -0,0 +1,57 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++
++namespace observer {
++
++template <size_t Capacity>
++class StreamQueue {
++ public:
++  explicit StreamQueue(bool enabled = true) : enabled_(enabled) {}
++
++  size_t enqueue(const uint8_t* bytes, size_t length) {
++    if (!enabled_) return length;
++    if (length > available()) {
++      ++dropped_records_;
++      dropped_bytes_ += length;
++      return 0;
++    }
++    for (size_t index = 0; index < length; ++index) {
++      bytes_[tail_] = bytes[index];
++      tail_ = (tail_ + 1) % Capacity;
++    }
++    size_ += length;
++    return length;
++  }
++
++  size_t dequeue(uint8_t* destination, size_t maximum) {
++    const size_t copied = maximum < size_ ? maximum : size_;
++    for (size_t index = 0; index < copied; ++index) {
++      destination[index] = bytes_[head_];
++      head_ = (head_ + 1) % Capacity;
++    }
++    size_ -= copied;
++    return copied;
++  }
++
++  void drop(size_t length) {
++    ++dropped_records_;
++    dropped_bytes_ += length;
++  }
++  bool empty() const { return size_ == 0; }
++  size_t available() const { return Capacity - size_; }
++  uint32_t droppedRecords() const { return dropped_records_; }
++  uint32_t droppedBytes() const { return dropped_bytes_; }
++
++ private:
++  uint8_t bytes_[Capacity]{};
++  size_t head_ = 0;
++  size_t tail_ = 0;
++  size_t size_ = 0;
++  bool enabled_;
++  uint32_t dropped_records_ = 0;
++  uint32_t dropped_bytes_ = 0;
++};
++
++}  // namespace observer
+diff --git a/src/observer/ObserverTransport.cpp b/src/observer/ObserverTransport.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..21ff4d6ec9af798a1e8fcb4d0de1ffe8acc36334
+--- /dev/null
++++ b/src/observer/ObserverTransport.cpp
+@@ -0,0 +1,564 @@
++#include "ObserverTransport.h"
++#if !defined(OBSERVER_TRANSPORT_PLATFORM_TEST)
++#include <utility/bonding.h>
++#endif
++#include <new>
++#include <stdio.h>
++
++#include "ObserverPreference.h"
++
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++
++namespace observer {
++
++namespace {
++constexpr uint8_t kServiceUuid[] = {0x1b, 0x5f, 0x6f, 0x02, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++constexpr uint8_t kLogUuid[] = {0x1b, 0x5f, 0x6f, 0x03, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++constexpr uint8_t kCommandUuid[] = {0x1b, 0x5f, 0x6f, 0x04, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++constexpr uint8_t kAckUuid[] = {0x1b, 0x5f, 0x6f, 0x05, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++constexpr uint8_t kStatsUuid[] = {0x1b, 0x5f, 0x6f, 0x06, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++constexpr uint16_t kAdvertisingInterval = 1600;  // 1 second
++constexpr uint16_t kNotificationBytes = 20;
++}
++
++Transport* Transport::instance_ = nullptr;
++Transport transport(false);
++LogMirror log_mirror;
++
++Transport::Transport(bool enabled)
++    : enabled_(enabled), policy_(enabled),
++      service_(BLEUuid(kServiceUuid)), log_characteristic_(BLEUuid(kLogUuid)),
++      command_characteristic_(BLEUuid(kCommandUuid)), ack_characteristic_(BLEUuid(kAckUuid)),
++      stats_characteristic_(BLEUuid(kStatsUuid)) {}
++
++void Transport::attachPreferences(bool enabled, const PeerIdentity& peer, bool has_peer) {
++  enabled_ = enabled;
++  policy_ = Policy(enabled, peer, has_peer);
++}
++
++void Transport::setPreferenceCallbacks(bool (*save_enabled)(bool),
++                                       bool (*save_peer)(bool, const PeerIdentity&)) {
++  save_enabled_ = save_enabled;
++  save_peer_ = save_peer;
++}
++
++bool Transport::begin(const char* name, bool enabled) {
++  if (!enabled || !save_enabled_) return false;
++  if (initialization_failed_) return failInitialization();
++  enabled_ = true;
++  policy_.setEnabled(true);
++  if (initialized_) return true;
++  instance_ = this;
++  Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
++  if (!Bluefruit.begin(1, 0)) return failInitialization();
++  core_ready_ = true;
++  Bluefruit.setTxPower(0);
++  Bluefruit.setName(name);
++  Bluefruit.Security.setMITM(true);
++  Bluefruit.Security.setIOCaps(true, false, false);
++  Bluefruit.Security.setPairPasskeyCallback(onPasskey);
++  Bluefruit.Security.setPairCompleteCallback(onPairComplete);
++  Bluefruit.Periph.setConnectCallback(onConnect);
++  Bluefruit.Periph.setDisconnectCallback(onDisconnect);
++  Bluefruit.Security.setSecuredCallback(onSecured);
++  if (service_.begin() != NRF_SUCCESS) return failInitialization();
++  log_characteristic_.setProperties(CHR_PROPS_NOTIFY);
++  log_characteristic_.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_NO_ACCESS);
++  log_characteristic_.setMaxLen(kNotificationBytes);
++  if (log_characteristic_.begin() != NRF_SUCCESS) return failInitialization();
++  command_characteristic_.setProperties(CHR_PROPS_WRITE);
++  command_characteristic_.setPermission(SECMODE_NO_ACCESS, SECMODE_ENC_WITH_MITM);
++  command_characteristic_.setMaxLen(kCommandBytes - 1);
++  command_characteristic_.setWriteCallback(onCommand);
++  if (command_characteristic_.begin() != NRF_SUCCESS) return failInitialization();
++  ack_characteristic_.setProperties(CHR_PROPS_WRITE);
++  ack_characteristic_.setPermission(SECMODE_NO_ACCESS, SECMODE_ENC_WITH_MITM);
++  ack_characteristic_.setMaxLen(kCommandBytes - 1);
++  ack_characteristic_.setWriteCallback(onAck);
++  if (ack_characteristic_.begin() != NRF_SUCCESS) return failInitialization();
++  stats_characteristic_.setProperties(CHR_PROPS_READ);
++  stats_characteristic_.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_NO_ACCESS);
++  stats_characteristic_.setMaxLen(128);
++  stats_characteristic_.setReadAuthorizeCallback(onStats);
++  if (stats_characteristic_.begin() != NRF_SUCCESS) return failInitialization();
++  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
++  Bluefruit.Advertising.addService(service_);
++  Bluefruit.ScanResponse.addName();
++  Bluefruit.Advertising.setInterval(kAdvertisingInterval, kAdvertisingInterval);
++  Bluefruit.Advertising.restartOnDisconnect(false);
++  initialized_ = true;
++  // Accepted opt-in, not entropy readiness. The loop acquires entropy before
++  // allocating capture storage or making the peripheral discoverable.
++  return true;
++}
++
++bool Transport::failInitialization() {
++  // Bluefruit has no safe end()/partial-GATT rollback API. Fail closed and
++  // require reboot instead of registering duplicate services on another opt-in.
++  initialization_failed_ = true;
++  initialized_ = false;
++  enabled_ = false;
++  policy_.setEnabled(false);
++  policy_.closeEnrollment();
++  onboarding_ = false;
++  if (core_ready_) Bluefruit.Advertising.stop();
++  releaseQueue();
++  if (save_enabled_) save_enabled_(false);
++  return false;
++}
++
++void Transport::serviceAdvertising() {
++  const bool discoverable = enabled_ && initialized_ && nonce_ready_ && log_queue_ &&
++      (policy_.hasPeer() || policy_.enrollmentOpen(millis()));
++  if (!discoverable) {
++    if (Bluefruit.Advertising.isRunning()) Bluefruit.Advertising.stop();
++  } else if (connectionHandle() == BLE_CONN_HANDLE_INVALID && !Bluefruit.Advertising.isRunning()) {
++    Bluefruit.Advertising.start(0);
++  }
++}
++
++bool Transport::authorizedAndSecured(uint16_t handle) const {
++  BLEConnection* connection = Bluefruit.Connection(handle);
++  if (!connection || !connection->connected() || !connection->bonded() || !connection->secured()) return false;
++  const ble_gap_addr_t peer_address = connection->getPeerAddr();
++  PeerIdentity identity{};
++  identity.type = peer_address.addr_type;
++  memcpy(identity.address, peer_address.addr, sizeof(identity.address));
++  const bool allowed = policy_.authorizes(true, identity, millis());
++  if (!allowed && !policy_.enrollmentOpen(millis())) connection->disconnect();
++  return allowed;
++}
++
++void Transport::setConnectionHandle(uint16_t handle) {
++  __atomic_store_n(&connection_handle_, handle, __ATOMIC_RELEASE);
++}
++
++uint16_t Transport::connectionHandle() const {
++  return __atomic_load_n(&connection_handle_, __ATOMIC_ACQUIRE);
++}
++
++bool Transport::refreshNonce(bool rotate) {
++  if (nonce_ready_ && !rotate) return true;
++  if (!core_ready_) return false;
++  const uint32_t now = millis();
++  if (entropy_attempted_ && static_cast<uint32_t>(now - entropy_attempt_at_) < kEntropyRetryMs) return false;
++  entropy_attempted_ = true;
++  entropy_attempt_at_ = now;
++  uint8_t available = 0;
++  if (sd_rand_application_bytes_available_get(&available) != NRF_SUCCESS || available < 8) return false;
++  uint8_t bytes[8]{};
++  if (sd_rand_application_vector_get(bytes, sizeof(bytes)) != NRF_SUCCESS) return false;
++  uint64_t nonce = 0;
++  for (unsigned index = 0; index < sizeof(bytes); ++index) nonce |= static_cast<uint64_t>(bytes[index]) << (index * 8);
++  if (nonce == 0 || nonce == boot_nonce_) return false;
++  boot_nonce_ = nonce;
++  nonce_ready_ = true;
++  return true;
++}
++
++bool Transport::enable(bool enabled) {
++  if (!save_enabled_ || !save_enabled_(enabled)) return false;
++  if (!initialized_) {
++    if (!enabled) { enabled_ = false; policy_.setEnabled(false); return true; }
++    enabled_ = true;
++    policy_.setEnabled(true);
++    if (!begin("SenseCAP Observer", true)) return false;
++    return true;
++  }
++  enabled_ = enabled;
++  policy_.setEnabled(enabled);
++
++  if (!enabled) {
++    closeEnrollment();
++    __atomic_store_n(&passkey_allowed_handle_, BLE_CONN_HANDLE_INVALID, __ATOMIC_RELEASE);
++    __atomic_store_n(&passkey_pending_, false, __ATOMIC_RELEASE);
++    disable_pending_ = true;
++    enabled_ = false;
++    policy_.setEnabled(false);
++    Bluefruit.Advertising.stop();
++    if (connectionHandle() != BLE_CONN_HANDLE_INVALID) {
++      BLEConnection* connection = Bluefruit.Connection(connectionHandle());
++      if (connection) connection->disconnect();
++    }
++    __atomic_store_n(&secured_, false, __ATOMIC_RELEASE);
++    return true;
++  }
++  disable_pending_ = false;
++  policy_.setEnabled(true);
++  return true;
++}
++
++bool Transport::revokePeer() {
++  if (!policy_.hasPeer()) return true;
++  ble_gap_addr_t address{};
++  address.addr_type = policy_.peer().type;
++  memcpy(address.addr, policy_.peer().address, sizeof(address.addr));
++  if (!persistPeer(false, PeerIdentity{})) return false;
++  bond_remove_key(BLE_GAP_ROLE_PERIPH, &address);
++  policy_.revoke();
++  if (connectionHandle() != BLE_CONN_HANDLE_INVALID) {
++    BLEConnection* connection = Bluefruit.Connection(connectionHandle());
++    if (connection) connection->disconnect();
++  }
++  return true;
++}
++
++bool Transport::beginEnrollment() {
++  if (!enabled_ || !initialized_ || !nonce_ready_ || !log_queue_ || !Serial) return false;
++  if (connectionHandle() != BLE_CONN_HANDLE_INVALID) {
++    BLEConnection* connection = Bluefruit.Connection(connectionHandle());
++    if (connection) connection->disconnect();
++    __atomic_store_n(&secured_, false, __ATOMIC_RELEASE);
++  }
++  if (policy_.hasPeer()) {
++    if (!revokePeer()) return false;
++    policy_.setEnabled(true);
++  }
++  onboarding_ = true;
++  enrollment_handle_ = BLE_CONN_HANDLE_INVALID;
++  enrollment_started_ = millis();
++  policy_.openEnrollment(enrollment_started_, kEnrollmentWindowMs);
++  if (!policy_.enrollmentOpen(enrollment_started_)) { onboarding_ = false; return false; }
++  Bluefruit.Security.setMITM(true);
++  Bluefruit.Security.setIOCaps(true, false, false);
++  Bluefruit.Security.setPairPasskeyCallback(onPasskey);
++  Bluefruit.Security.setPairCompleteCallback(onPairComplete);
++  serviceAdvertising();
++  Serial.println("Observer BLE enrollment open for 60 seconds; pair the intended Pi now.");
++  return true;
++}
++
++bool Transport::processAck(const char* bytes, size_t length) {
++  Ack ack{};
++  if (!parseAck(bytes, length, ack)) return false;
++  const bool acknowledged = log_queue_ && log_queue_->acknowledge(ack.boot_nonce, ack.sequence);
++  if (acknowledged) {
++    delivery_.acknowledged();
++    __atomic_store_n(&complete_record_sent_, false, __ATOMIC_RELEASE);
++  }
++  return acknowledged;
++}
++
++void Transport::onConnect(uint16_t handle) {
++  if (instance_) instance_->callback_events_.postConnect(handle);
++}
++
++void Transport::onDisconnect(uint16_t handle, uint8_t) {
++  if (instance_) instance_->callback_events_.postDisconnect(handle);
++}
++
++void Transport::onSecured(uint16_t handle) {
++  if (instance_) instance_->callback_events_.postSecured(handle);
++}
++
++void Transport::onCommand(uint16_t handle, BLECharacteristic*, uint8_t* data, uint16_t length) {
++  if (!instance_ || !__atomic_load_n(&instance_->secured_, __ATOMIC_ACQUIRE) || !instance_->authorizedAndSecured(handle) || length == 0 ||
++      length >= kCommandBytes) return;
++  if (length >= 4 && memcmp(data, "ack ", 4) == 0) return;
++  instance_->command_ingress_.submitCommand(reinterpret_cast<const char*>(data), length);
++}
++
++void Transport::onAck(uint16_t handle, BLECharacteristic*, uint8_t* data, uint16_t length) {
++  if (!instance_ || !__atomic_load_n(&instance_->secured_, __ATOMIC_ACQUIRE) || !instance_->authorizedAndSecured(handle) || !length ||
++      length >= kCommandBytes) return;
++  instance_->ack_ingress_.submit(reinterpret_cast<const char*>(data), length);
++}
++
++void Transport::onStats(uint16_t handle, BLECharacteristic*, ble_gatts_evt_read_t* request) {
++  if (!instance_ || !instance_->authorizedAndSecured(handle)) return;
++  char buffer[128]{};
++  const StatsValues stats = instance_->stats_snapshot_.read();
++  const uint16_t length = static_cast<uint16_t>(formatStats(stats, buffer, sizeof(buffer)));
++  if (request->offset > length) return;
++  ble_gatts_rw_authorize_reply_params_t reply{};
++  reply.type = BLE_GATTS_AUTHORIZE_TYPE_READ;
++  reply.params.read.gatt_status = BLE_GATT_STATUS_SUCCESS;
++  reply.params.read.update = 1;
++  reply.params.read.len = length - request->offset;
++  reply.params.read.offset = request->offset;
++  reply.params.read.p_data = reinterpret_cast<uint8_t*>(buffer + request->offset);
++  sd_ble_gatts_rw_authorize_reply(handle, &reply);
++}
++
++bool Transport::onPasskey(uint16_t handle, uint8_t const passkey[6], bool match_request) {
++  if (!instance_ || match_request ||
++      __atomic_load_n(&instance_->passkey_allowed_handle_, __ATOMIC_ACQUIRE) != handle) return false;
++  memcpy(instance_->pending_passkey_, passkey, sizeof(instance_->pending_passkey_));
++  __atomic_store_n(&instance_->passkey_state_, 1, __ATOMIC_RELEASE);
++  __atomic_store_n(&instance_->passkey_pending_, true, __ATOMIC_RELEASE);
++  return true;
++}
++
++void Transport::onPairComplete(uint16_t handle, uint8_t auth_status) {
++  if (instance_) instance_->callback_events_.postPairComplete(handle, auth_status);
++}
++
++bool Transport::takeCommand(char* destination, size_t capacity) {
++  return command_ingress_.takeCommand(destination, capacity);
++}
++
++size_t Transport::writeLog(const uint8_t* bytes, size_t length) {
++  if (!enabled_) return length;
++  for (size_t index = 0; index < length; ++index) {
++    if (!line_buffer_ || unavailable_line_bytes_ != 0) {
++      // No allocation/entropy wait in the radio callback. If readiness changes
++      // mid-line, discard its remaining tail rather than admit a partial RAW.
++      ++unavailable_line_bytes_;
++      if (bytes[index] == '\n') {
++        if (log_queue_) log_queue_->rejectUnavailable(unavailable_line_bytes_);
++        else {
++          sequence_state_.skip();
++          ++prequeue_unavailable_records_;
++          prequeue_unavailable_bytes_ += unavailable_line_bytes_;
++        }
++        unavailable_line_bytes_ = 0;
++      }
++    } else line_buffer_->write(bytes[index]);
++  }
++  return length;
++}
++
++void Transport::service() {
++  if (!initialized_) return;
++  uint16_t event_handle = BLE_CONN_HANDLE_INVALID;
++  uint8_t event_status = 0;
++  if (callback_events_.takeDisconnect(event_handle) && connectionHandle() == event_handle) {
++    setConnectionHandle(BLE_CONN_HANDLE_INVALID);
++    admission_.disconnected(event_handle);
++    __atomic_store_n(&secured_, false, __ATOMIC_RELEASE);
++    delivery_.disconnected();
++    __atomic_store_n(&complete_record_sent_, false, __ATOMIC_RELEASE);
++    if (enrollment_handle_ == event_handle) enrollment_handle_ = BLE_CONN_HANDLE_INVALID;
++    command_ingress_.clear();
++    ack_length_ = 0;
++    if (log_queue_) log_queue_->restartHead();
++  }
++  if (callback_events_.takeConnect(event_handle)) {
++    BLEConnection* connection = Bluefruit.Connection(event_handle);
++    const bool enrolling = onboarding_ && policy_.enrollmentOpen(millis());
++    bool identity_known = false;
++    PeerIdentity identity{};
++    if (connection) {
++      const ble_gap_addr_t address = connection->getPeerAddr();
++      identity.type = address.addr_type;
++      memcpy(identity.address, address.addr, sizeof(identity.address));
++      // getPeerAddr() yields the persisted bond identity once the bond has loaded.
++      // Stable public/static addresses and S140-resolved RPAs are also comparable
++      // before slot assignment. Unresolved private addresses are held only under the
++      // bounded timeout and cannot access data or commands before bonded authorization.
++      identity_known = identityKnownAtConnect(connection->bonded(), address.addr_type, address.addr_id_peer);
++    }
++    const bool accepted = admitsCandidate(
++        enabled_, connectionHandle() == BLE_CONN_HANDLE_INVALID,
++        hasLiveConnection(connection != nullptr, connection && connection->connected()),
++        enrolling, enrollment_handle_ == BLE_CONN_HANDLE_INVALID,
++        policy_.hasPeer(), identity_known, identity, policy_.peer());
++    if (!accepted) {
++      if (connection) connection->disconnect();
++    } else {
++      setConnectionHandle(event_handle);
++      __atomic_store_n(&secured_, false, __ATOMIC_RELEASE);
++      connected_at_ = millis();
++      admission_.connected(event_handle, connected_at_);
++      if (enrolling) {
++        enrollment_handle_ = event_handle;
++        __atomic_store_n(&passkey_allowed_handle_, event_handle, __ATOMIC_RELEASE);
++      }
++    }
++  }
++  if (admission_.pending() && !policy_.enrollmentOpen(millis())) {
++    const uint16_t handle = connectionHandle();
++    BLEConnection* connection = Bluefruit.Connection(handle);
++    if (connection && connection->bonded() && connection->secured() && policy_.hasPeer()) {
++      const ble_gap_addr_t address = connection->getPeerAddr();
++      PeerIdentity identity{};
++      identity.type = address.addr_type;
++      memcpy(identity.address, address.addr, sizeof(identity.address));
++      if (!admission_.authorize(handle, identity, policy_.peer())) connection->disconnect();
++    }
++    uint16_t expired_handle = BLE_CONN_HANDLE_INVALID;
++    if (admission_.takeDisconnect(millis(), expired_handle)) {
++      BLEConnection* expired_connection = Bluefruit.Connection(expired_handle);
++      if (expired_connection) expired_connection->disconnect();
++    }
++  }
++  if (disable_pending_ && callback_events_.safeToReleaseQueue(enabled_, connectionHandle(), admission_.pending())) {
++    if (line_buffer_) line_buffer_->reset();
++    releaseQueue();
++    __atomic_store_n(&secured_, false, __ATOMIC_RELEASE);
++    disable_pending_ = false;
++  }
++  if (!enabled_) return;
++  if (onboarding_ && (!Serial || static_cast<uint32_t>(millis() - enrollment_started_) >= kEnrollmentWindowMs)) {
++    closeEnrollment();
++  }
++  // The loop is the sole snapshot writer; the GATT callback reads only this copy.
++  updateStatsSnapshot();
++  if (__atomic_exchange_n(&passkey_pending_, false, __ATOMIC_ACQ_REL) &&
++      Serial && onboarding_ && policy_.enrollmentOpen(millis())) {
++    Serial.print("Observer BLE passkey: ");
++    if (__atomic_load_n(&passkey_state_, __ATOMIC_ACQUIRE) == 1) {
++      Serial.write(pending_passkey_, sizeof(pending_passkey_));
++      __atomic_store_n(&passkey_state_, 0, __ATOMIC_RELEASE);
++    }
++    Serial.println();
++  }
++  if (callback_events_.takePairComplete(event_handle, event_status) && onboarding_ &&
++      event_handle == enrollment_handle_ && policy_.enrollmentOpen(millis())) {
++    pair_complete_handle_ = event_handle;
++    pair_complete_status_ = event_status;
++    __atomic_store_n(&pair_complete_pending_, true, __ATOMIC_RELEASE);
++  }
++  if (pair_complete_pending_) {
++    if (!__atomic_exchange_n(&pair_complete_pending_, false, __ATOMIC_ACQ_REL)) return;
++    const uint16_t handle = pair_complete_handle_;
++    const uint8_t status = pair_complete_status_;
++    if (status == BLE_GAP_SEC_STATUS_SUCCESS && onboarding_ &&
++        enrollment_handle_ == handle && policy_.enrollmentOpen(millis())) {
++      BLEConnection* connection = Bluefruit.Connection(handle);
++      if (!connection || !connection->bonded()) {
++        if (connection) connection->disconnect();
++      } else {
++        const ble_gap_addr_t address = connection->getPeerAddr();
++        PeerIdentity identity{};
++        identity.type = address.addr_type;
++        memcpy(identity.address, address.addr, sizeof(identity.address));
++        if (!policy_.enroll(identity, millis()) || !persistPeer(true, identity)) {
++          if (save_peer_) save_peer_(false, PeerIdentity{});
++          connection->removeBondKey();
++          policy_.revoke();
++          connection->disconnect();
++        } else {
++          onboarding_ = false;
++          __atomic_store_n(&passkey_allowed_handle_, BLE_CONN_HANDLE_INVALID, __ATOMIC_RELEASE);
++          __atomic_store_n(&passkey_pending_, false, __ATOMIC_RELEASE);
++          const uint16_t completed_handle = enrollment_handle_;
++          enrollment_handle_ = BLE_CONN_HANDLE_INVALID;
++          Bluefruit.Advertising.stop();
++          policy_.closeEnrollment();
++          if (completed_handle == connectionHandle()) disable_pending_ = true;
++          if (connection->secured()) {
++            admission_.authorize(handle, identity, identity);
++            __atomic_store_n(&secured_, true, __ATOMIC_RELEASE);
++          }
++          Serial.println("Observer BLE peer pinned; enrollment closed.");
++        }
++      }
++    }
++  }
++  if (callback_events_.takeSecured(event_handle) && connectionHandle() == event_handle &&
++      !policy_.enrollmentOpen(millis())) {
++    const bool allowed = authorizedAndSecured(event_handle);
++    __atomic_store_n(&secured_, allowed, __ATOMIC_RELEASE);
++    if (allowed) {
++      BLEConnection* connection = Bluefruit.Connection(event_handle);
++      if (connection) {
++        const ble_gap_addr_t address = connection->getPeerAddr();
++        PeerIdentity identity{};
++        identity.type = address.addr_type;
++        memcpy(identity.address, address.addr, sizeof(identity.address));
++        admission_.authorize(event_handle, identity, policy_.peer());
++      }
++    }
++  }
++  if (onboarding_ && static_cast<uint32_t>(millis() - enrollment_started_) >= kEnrollmentWindowMs) {
++    closeEnrollment();
++  }
++  if (!nonce_ready_) {
++    if (!refreshNonce()) return;
++  }
++  if (!log_queue_ && !allocateQueue()) { failInitialization(); return; }
++  serviceAdvertising();
++  // This loop is the only entropy/queue-session owner. Enqueue never calls
++  // SoftDevice or waits; exhausted admission loss is counted until fresh bytes
++  // are available. Already queued records retain their own session identities.
++  if (log_queue_ && log_queue_->sequenceExhausted() && refreshNonce(true)) {
++    log_queue_->setBootNonce(boot_nonce_);
++  }
++  if (policy_.enrollmentOpen(millis())) return;
++  if (!ack_length_) ack_ingress_.take(ack_, sizeof(ack_), ack_length_);
++  if (ack_length_) { processAck(ack_, ack_length_); ack_length_ = 0; }
++  const uint16_t handle = connectionHandle();
++  if (!enabled_ || !nonce_ready_ || !log_queue_ || !__atomic_load_n(&secured_, __ATOMIC_ACQUIRE) || !authorizedAndSecured(handle) ||
++      !log_characteristic_.notifyEnabled(handle) || log_queue_->empty()) return;
++  const unsigned long now = millis();
++  if (!delivery_.maySend(now)) return;
++  if (__atomic_load_n(&complete_record_sent_, __ATOMIC_ACQUIRE)) {
++    log_queue_->restartHead();
++    delivery_.restartWholeRecord();
++    __atomic_store_n(&complete_record_sent_, false, __ATOMIC_RELEASE);
++  }
++  RecordFragment fragment;
++  if (!log_queue_->peek(fragment, kNotificationBytes - kFrameHeaderBytes)) return;
++  uint8_t notification[kNotificationBytes];
++  const size_t encoded = encodeFrame(fragment.boot_nonce, fragment.sequence, fragment.total_length,
++                                     fragment.offset, fragment.bytes, fragment.length,
++                                     notification, sizeof(notification));
++  if (!encoded) return;
++  delivery_.attempted(now);
++  if (log_characteristic_.notify(handle, notification, encoded)) {
++    if (!log_queue_->consume(fragment.boot_nonce, fragment.sequence, fragment.length)) return;
++    const bool record_complete = (fragment.offset + fragment.length) == fragment.total_length;
++    __atomic_store_n(&complete_record_sent_, record_complete, __ATOMIC_RELEASE);
++    delivery_.fragmentSent(record_complete);
++  } else {
++    log_queue_->restartHead();
++    ++failed_notifications_;
++    delivery_.fragmentFailed();
++    __atomic_store_n(&complete_record_sent_, false, __ATOMIC_RELEASE);
++  }
++}
++
++size_t LogMirror::write(uint8_t byte) { return transport.writeLog(&byte, 1); }
++size_t LogMirror::write(const uint8_t* bytes, size_t length) { return transport.writeLog(bytes, length); }
++
++bool Transport::closeEnrollment() {
++  if (!onboarding_) return false;
++  __atomic_store_n(&passkey_allowed_handle_, BLE_CONN_HANDLE_INVALID, __ATOMIC_RELEASE);
++  __atomic_store_n(&passkey_pending_, false, __ATOMIC_RELEASE);
++  policy_.closeEnrollment();
++  onboarding_ = false;
++  const uint16_t closing_handle = enrollment_handle_;
++  if (enrollment_handle_ != BLE_CONN_HANDLE_INVALID) {
++    BLEConnection* connection = Bluefruit.Connection(enrollment_handle_);
++    if (connection) {
++      if (connection->bonded() && !policy_.hasPeer()) connection->removeBondKey();
++      connection->disconnect();
++    }
++  }
++  enrollment_handle_ = BLE_CONN_HANDLE_INVALID;
++  if (closing_handle != BLE_CONN_HANDLE_INVALID) disable_pending_ = true;
++  __atomic_store_n(&secured_, false, __ATOMIC_RELEASE);
++  Bluefruit.Advertising.stop();
++  Serial.println("Observer BLE enrollment closed.");
++  return true;
++}
++
++bool Transport::allocateQueue() {
++  if (!log_queue_) {
++    log_queue_ = new (std::nothrow) Queue(true, boot_nonce_, sequence_state_);
++    if (!log_queue_) return false;
++    line_buffer_ = new (std::nothrow) LineBuffer<256, kLogQueueBytes, Queue>(*log_queue_);
++    if (!line_buffer_) { delete log_queue_; log_queue_ = nullptr; return false; }
++  }
++  return true;
++}
++
++void Transport::releaseQueue() {
++  delete line_buffer_; line_buffer_ = nullptr;
++  delete log_queue_; log_queue_ = nullptr;
++}
++
++void Transport::updateStatsSnapshot() {
++  stats_snapshot_.publish(evictedRecords(), evictedBytes(), truncatedRecords(), truncatedBytes(), failedNotifications(),
++                          prequeue_unavailable_records_ + (log_queue_ ? log_queue_->unavailableRecords() : 0),
++                          prequeue_unavailable_bytes_ + (log_queue_ ? log_queue_->unavailableBytes() : 0));
++}
++
++bool Transport::persistPeer(bool has_peer, const PeerIdentity& peer) {
++  return save_peer_ && save_peer_(has_peer, peer);
++}
++
++}  // namespace observer
++
++#endif
+diff --git a/src/observer/ObserverTransport.h b/src/observer/ObserverTransport.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..8a8d90d2835d6b8e34f63de81ad5ba65c0c8b1a1
+--- /dev/null
++++ b/src/observer/ObserverTransport.h
+@@ -0,0 +1,152 @@
++#pragma once
++
++#include "ObserverStreamQueue.h"
++#include "ObserverRecordQueue.h"
++#include "ObserverLineBuffer.h"
++#include "ObserverProtocol.h"
++#include "ObserverPolicy.h"
++#include "ObserverPreference.h"
++#include "ObserverAckIngress.h"
++#include "ObserverCommandIngress.h"
++#include "ObserverCallbackState.h"
++#include "ObserverConnectionAdmission.h"
++#include "ObserverDelivery.h"
++#include "ObserverStatsSnapshot.h"
++
++#if defined(SENSECAP_OBSERVER_TRANSPORT)
++#if !defined(OBSERVER_TRANSPORT_PLATFORM_TEST)
++#include <Arduino.h>
++#include <bluefruit.h>
++#endif
++
++namespace observer {
++
++class LogMirror;
++
++class Transport {
++ public:
++  static constexpr size_t kLogQueueBytes = 2048;
++  static constexpr size_t kLogQueueRecords = 16;
++  static constexpr size_t kCommandBytes = 96;
++  static constexpr uint32_t kRetryIntervalMs = 1000;
++  static constexpr uint32_t kFragmentIntervalMs = 10;
++  static constexpr uint32_t kEnrollmentWindowMs = 60000;
++  static constexpr uint32_t kUnauthenticatedTimeoutMs = 5000;
++  static constexpr uint32_t kEntropyRetryMs = 100;
++
++  explicit Transport(bool enabled = false);
++  bool begin(const char* name, bool enabled);
++  bool initialized() const { return initialized_; }
++  void service();
++  bool takeCommand(char* destination, size_t capacity);
++  bool enable(bool enabled);
++  bool enrollmentOpen() const { return policy_.enrollmentOpen(millis()); }
++  bool revokePeer();
++  bool beginEnrollment();
++  bool closeEnrollment();
++  uint32_t droppedRecords() const { return prequeue_unavailable_records_ + (log_queue_ ? log_queue_->droppedRecords() : 0); }
++  uint32_t droppedBytes() const { return prequeue_unavailable_bytes_ + (log_queue_ ? log_queue_->droppedBytes() : 0); }
++  uint32_t evictedRecords() const { return log_queue_ ? log_queue_->evictedRecords() : 0; }
++  uint32_t evictedBytes() const { return log_queue_ ? log_queue_->evictedBytes() : 0; }
++  uint32_t truncatedRecords() const { return log_queue_ ? log_queue_->truncatedRecords() : 0; }
++  uint32_t truncatedBytes() const { return log_queue_ ? log_queue_->truncatedBytes() : 0; }
++  uint32_t failedNotifications() const { return failed_notifications_; }
++  void attachPreferences(bool enabled, const PeerIdentity& peer, bool has_peer);
++  void setPreferenceCallbacks(bool (*save_enabled)(bool),
++                              bool (*save_peer)(bool, const PeerIdentity&));
++  size_t writeLog(const uint8_t* bytes, size_t length);
++
++ private:
++#if defined(OBSERVER_TRANSPORT_PLATFORM_TEST)
++  friend struct TransportTestAccess;
++#endif
++  static Transport* instance_;
++  BLEService service_;
++  BLECharacteristic log_characteristic_;
++  BLECharacteristic command_characteristic_;
++  BLECharacteristic ack_characteristic_;
++  BLECharacteristic stats_characteristic_;
++  using Queue = RecordQueue<kLogQueueBytes, kLogQueueRecords>;
++  Queue* log_queue_ = nullptr;
++  LineBuffer<256, kLogQueueBytes, Queue>* line_buffer_ = nullptr;
++  CommandIngress command_ingress_;
++  AckIngress ack_ingress_;
++  CallbackEvents callback_events_;
++  ConnectionAdmission admission_{kUnauthenticatedTimeoutMs};
++  char ack_[kCommandBytes]{};
++  size_t ack_length_ = 0;
++  volatile uint16_t connection_handle_ = BLE_CONN_HANDLE_INVALID;
++  volatile bool secured_ = false;
++  bool initialized_ = false;
++  bool core_ready_ = false;
++  bool initialization_failed_ = false;
++  bool entropy_attempted_ = false;
++  uint32_t entropy_attempt_at_ = 0;
++  bool enabled_ = false;
++  bool onboarding_ = false;
++  volatile bool complete_record_sent_ = false;
++  DeliverySchedule delivery_{kRetryIntervalMs, kFragmentIntervalMs};
++  volatile bool passkey_pending_ = false;
++  volatile uint8_t passkey_state_ = 0;
++  volatile uint16_t passkey_allowed_handle_ = BLE_CONN_HANDLE_INVALID;
++  uint8_t pending_passkey_[6]{};
++  volatile bool pair_complete_pending_ = false;
++  uint16_t pair_complete_handle_ = BLE_CONN_HANDLE_INVALID;
++  uint8_t pair_complete_status_ = BLE_GAP_SEC_STATUS_SUCCESS;
++  uint32_t failed_notifications_ = 0;
++  size_t unavailable_line_bytes_ = 0;
++  uint32_t prequeue_unavailable_records_ = 0;
++  uint32_t prequeue_unavailable_bytes_ = 0;
++  QueueSequenceState sequence_state_;
++  uint32_t connected_at_ = 0;
++  bool disable_pending_ = false;
++  unsigned long enrollment_started_ = 0;
++  uint8_t nonce_bytes_[8]{};
++  size_t nonce_bytes_read_ = 0;
++  uint64_t boot_nonce_ = 0;
++  bool nonce_ready_ = false;
++  Policy policy_;
++  bool (*save_enabled_)(bool) = nullptr;
++  bool (*save_peer_)(bool, const PeerIdentity&) = nullptr;
++  uint16_t enrollment_handle_ = BLE_CONN_HANDLE_INVALID;
++  StatsSnapshot stats_snapshot_;
++
++  static void onConnect(uint16_t connection_handle);
++  static void onDisconnect(uint16_t connection_handle, uint8_t reason);
++  static void onSecured(uint16_t connection_handle);
++  static void onCommand(uint16_t connection_handle, BLECharacteristic* characteristic, uint8_t* data, uint16_t length);
++  static void onAck(uint16_t connection_handle, BLECharacteristic* characteristic, uint8_t* data, uint16_t length);
++  static void onStats(uint16_t connection_handle, BLECharacteristic* characteristic, ble_gatts_evt_read_t* request);
++  static bool onPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request);
++  static void onPairComplete(uint16_t connection_handle, uint8_t auth_status);
++  bool authorizedAndSecured(uint16_t connection_handle) const;
++  bool refreshNonce(bool rotate = false);
++  bool persistPeer(bool has_peer, const PeerIdentity& peer);
++  bool processAck(const char* bytes, size_t length);
++  bool allocateQueue();
++  bool failInitialization();
++  void serviceAdvertising();
++  void releaseQueue();
++  void updateStatsSnapshot();
++  void setConnectionHandle(uint16_t handle);
++  uint16_t connectionHandle() const;
++};
++
++extern Transport transport;
++
++class LogMirror : public Stream {
++ public:
++  int available() override { return Serial.available(); }
++  int read() override { return Serial.read(); }
++  int peek() override { return Serial.peek(); }
++  void flush() override {}
++  size_t write(uint8_t byte) override;
++  size_t write(const uint8_t* bytes, size_t length) override;
++};
++
++extern LogMirror log_mirror;
++inline Stream& logOutput() { return log_mirror; }
++
++}  // namespace observer
++
++#endif
+diff --git a/test/test_observer_transport/test_stream_queue.cpp b/test/test_observer_transport/test_stream_queue.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d462a61a8cb23608d903f8705d5e6480aaa226c
+--- /dev/null
++++ b/test/test_observer_transport/test_stream_queue.cpp
+@@ -0,0 +1,1657 @@
++#include <gtest/gtest.h>
++
++#include <array>
++#include <algorithm>
++#include <cstdint>
++#include <string>
++#include <utility>
++#include <vector>
++#include <new>
++
++// Observer capture uses nothrow allocation; inject real allocation failures
++// without replacing normal allocations used by gtest/the fake platform.
++inline int fake_fail_nothrow_after = -1, fake_nothrow_allocations = 0;
++void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
++  ++fake_nothrow_allocations;
++  if (fake_fail_nothrow_after == 0) return nullptr;
++  if (fake_fail_nothrow_after > 0) --fake_fail_nothrow_after;
++  try { return ::operator new(size); } catch (...) { return nullptr; }
++}
++
++#include "observer/ObserverStreamQueue.h"
++#include "observer/ObserverCommand.h"
++#include "observer/ObserverLineBuffer.h"
++#include "observer/ObserverRecordQueue.h"
++#include "observer/ObserverProtocol.h"
++#include "observer/ObserverPolicy.h"
++#include "observer/ObserverPreference.h"
++#include "observer/ObserverAckIngress.h"
++#include "observer/ObserverDelivery.h"
++#include "observer/ObserverCommandIngress.h"
++#include "observer/ObserverStatsSnapshot.h"
++#include "observer/ObserverConnectionAdmission.h"
++#include "observer/ObserverCallbackState.h"
++#include <Arduino.h>
++#include <MeshCore.h>
++// Storage adapter used to execute the real CommonCLI legacy load/save path in
++// the native fixture without mocking NodePrefs or ConfigSerializer.
++class File : public Stream {
++ public:
++  File() = default;
++  File(std::string* bytes, bool writable) : bytes_(bytes), writable_(writable) {}
++  explicit operator bool() const { return bytes_ != nullptr; }
++  int available() override { return bytes_ ? static_cast<int>(bytes_->size() - position_) : 0; }
++  int read() override { return bytes_ && position_ < bytes_->size() ? (*bytes_)[position_++] : -1; }
++  size_t read(uint8_t* output, size_t length) {
++    size_t count = 0;
++    while (count < length && available() > 0) output[count++] = static_cast<uint8_t>(read());
++    return count;
++  }
++  size_t write(uint8_t byte) override {
++    if (!bytes_ || !writable_) return 0;
++    bytes_->push_back(static_cast<char>(byte));
++    return 1;
++  }
++  using Stream::write;
++  size_t print(unsigned char value, int = DEC) override { return printNumber(value); }
++  size_t print(int value, int = DEC) override { return printNumber(value); }
++  size_t print(unsigned int value, int = DEC) override { return printNumber(value); }
++  size_t print(long value, int = DEC) override { return printNumber(value); }
++  size_t print(unsigned long value, int = DEC) override { return printNumber(value); }
++  size_t print(long long value, int = DEC) override { return printNumber(value); }
++  size_t print(unsigned long long value, int = DEC) override { return printNumber(value); }
++  size_t print(double value, int precision = 2) override {
++    char text[48];
++    snprintf(text, sizeof(text), "%.*f", precision, value);
++    return Print::print(text);
++  }
++  void close() {}
++
++ private:
++  template <typename T>
++  size_t printNumber(T value) {
++    char text[48];
++    snprintf(text, sizeof(text), "%lld", static_cast<long long>(value));
++    return Print::print(text);
++  }
++  std::string* bytes_ = nullptr;
++  size_t position_ = 0;
++  bool writable_ = false;
++};
++
++class FILESYSTEM {
++ public:
++  bool exists(const char* path) const {
++    return (strcmp(path, "/com_prefs") == 0 && has_legacy_) ||
++           (strcmp(path, "/prefs.json") == 0 && has_prefs_);
++  }
++  File open(const char* path) {
++    if (strcmp(path, "/com_prefs") == 0 && has_legacy_) return File(&legacy_, false);
++    if (strcmp(path, "/prefs.json") == 0 && has_prefs_) return File(&prefs_, false);
++    return {};
++  }
++  File open(const char* path, const char* mode, bool) {
++    if (strcmp(path, "/prefs.json") != 0 || strcmp(mode, "w") != 0) return {};
++    prefs_.clear();
++    has_prefs_ = true;
++    return File(&prefs_, true);
++  }
++  bool remove(const char* path) {
++    if (strcmp(path, "/prefs.json") != 0) return false;
++    prefs_.clear();
++    has_prefs_ = false;
++    return true;
++  }
++  void mkdir(const char*) {}
++  void addLegacyPrefs(std::string bytes) { legacy_ = std::move(bytes); has_legacy_ = true; }
++  const std::string& migratedPrefs() const { return prefs_; }
++  bool hasMigratedPrefs() const { return has_prefs_; }
++
++ private:
++  std::string legacy_;
++  std::string prefs_;
++  bool has_legacy_ = false;
++  bool has_prefs_ = false;
++};
++#include "observer/ObserverNodePrefs.h"
++
++// The native test filter compiles the real serializer sources but omits the
++// target-bound CommonRadioPrefs.cpp translation unit. These fallbacks satisfy
++// its unrelated dynamic-radio vtable slots; preference serialization and
++// CommonRadioPrefs::handleCommand remain production code, not test doubles.
++bool CommonRadioPrefs::setByKey(const char*, const char*) { return false; }
++bool CommonRadioPrefs::getByKey(const char*, char*, size_t) { return false; }
++
++// Compile the actual transport against only a fake platform boundary. The fake
++// enforces the real S140 ordering: entropy is unavailable before Bluefruit.begin.
++#include <Arduino.h>
++#define SENSECAP_OBSERVER_TRANSPORT
++#define OBSERVER_TRANSPORT_PLATFORM_TEST
++constexpr uint16_t BLE_CONN_HANDLE_INVALID = 0xffff;
++constexpr int NRF_SUCCESS = 0, BANDWIDTH_MAX = 0, CHR_PROPS_NOTIFY = 1,
++    CHR_PROPS_WRITE = 2, CHR_PROPS_READ = 4, SECMODE_ENC_WITH_MITM = 3,
++    SECMODE_NO_ACCESS = 0, BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE = 0,
++    BLE_GAP_ROLE_PERIPH = 0, BLE_GATTS_AUTHORIZE_TYPE_READ = 0,
++    BLE_GATT_STATUS_SUCCESS = 0, BLE_GAP_SEC_STATUS_SUCCESS = 0;
++struct ble_gap_addr_t { uint8_t addr_type = 0; uint8_t addr[6]{}; uint8_t addr_id_peer = 0; };
++struct ble_gatts_evt_read_t { uint16_t offset = 0; };
++struct ble_gatts_rw_authorize_reply_params_t {
++  int type;
++  struct { struct { int gatt_status, update, len, offset; uint8_t* p_data; } read; } params;
++};
++struct FakeSerial {
++  bool open = true;
++  std::string output;
++  operator bool() const { return open; }
++  int available() { return 0; } int read() { return -1; } int peek() { return -1; }
++  void print(const char* text) { output += text; }
++  void println(const char* text = "") { output += text; output += '\n'; }
++  size_t write(const uint8_t* data, size_t size) { output.append(reinterpret_cast<const char*>(data), size); return size; }
++} Serial;
++struct BLEUuid { explicit BLEUuid(const uint8_t*) {} };
++inline int fake_gatt_status = 0, fake_gatt_calls = 0, fake_notifications = 0;
++struct BLECharacteristic;
++using FakeWriteCallback = void (*)(uint16_t, BLECharacteristic*, uint8_t*, uint16_t);
++inline std::vector<FakeWriteCallback> fake_writes;
++inline void (*fake_read)(uint16_t, BLECharacteristic*, ble_gatts_evt_read_t*) = nullptr;
++inline int fake_reads = 0;
++struct BLEService {
++  explicit BLEService(BLEUuid) {}
++  int begin() { ++fake_gatt_calls; return fake_gatt_status; }
++};
++struct BLECharacteristic {
++  explicit BLECharacteristic(BLEUuid) {}
++  void setProperties(int) {} void setPermission(int, int) {} void setMaxLen(int) {}
++  void setWriteCallback(FakeWriteCallback cb) { fake_writes.push_back(cb); }
++  void setReadAuthorizeCallback(decltype(fake_read) cb) { fake_read = cb; }
++  int begin() { ++fake_gatt_calls; return fake_gatt_status; }
++  bool notifyEnabled(uint16_t) { return true; }
++  bool notify(uint16_t, const uint8_t*, size_t) { ++fake_notifications; return true; }
++};
++struct BLEConnection {
++  bool live = false, bond = false, secure = false;
++  unsigned disconnects = 0;
++  ble_gap_addr_t address{};
++  bool connected() { return live; } bool bonded() { return bond; } bool secured() { return secure; }
++  ble_gap_addr_t getPeerAddr() { return address; }
++  void disconnect() { ++disconnects; } // Completion is deliberately asynchronous.
++  void removeBondKey() { bond = false; }
++};
++struct FakeBluefruit {
++  bool core = false, begin_ok = true, entropy = false;
++  int begins = 0, entropy_calls = 0, entropy_before_core = 0;
++  uint64_t random = 42;
++  BLEConnection connection;
++  struct {
++    bool running = false, restart = true, start_ok = true;
++    int starts = 0, stops = 0;
++    void addFlags(int) {} void addService(BLEService&) {} void setInterval(int, int) {}
++    void restartOnDisconnect(bool value) { restart = value; }
++    bool start(int) { ++starts; running = start_ok; return start_ok; }
++    bool stop() { ++stops; running = false; return true; }
++    bool isRunning() { return running; }
++  } Advertising;
++  struct { void addName() {} } ScanResponse;
++  struct {
++    bool mitm = false, display = false;
++    bool (*passkey)(uint16_t, const uint8_t*, bool) = nullptr;
++    void (*pair)(uint16_t, uint8_t) = nullptr;
++    void (*secured)(uint16_t) = nullptr;
++    void setMITM(bool value) { mitm = value; }
++    void setIOCaps(bool d, bool, bool) { display = d; }
++    void setPairPasskeyCallback(decltype(passkey) cb) { passkey = cb; }
++    void setPairCompleteCallback(decltype(pair) cb) { pair = cb; }
++    void setSecuredCallback(decltype(secured) cb) { secured = cb; }
++  } Security;
++  struct {
++    void (*connect)(uint16_t) = nullptr;
++    void (*disconnect)(uint16_t, uint8_t) = nullptr;
++    void setConnectCallback(decltype(connect) cb) { connect = cb; }
++    void setDisconnectCallback(decltype(disconnect) cb) { disconnect = cb; }
++  } Periph;
++  void configPrphBandwidth(int) {}
++  bool begin(int, int) { ++begins; core = begin_ok; return begin_ok; }
++  void setTxPower(int) {} void setName(const char*) {}
++  BLEConnection* Connection(uint16_t handle) { return handle == 1 ? &connection : nullptr; }
++} Bluefruit;
++inline int sd_rand_application_bytes_available_get(uint8_t* available) {
++  ++Bluefruit.entropy_calls;
++  if (!Bluefruit.core) { ++Bluefruit.entropy_before_core; return 1; }
++  *available = Bluefruit.entropy ? 8 : 0;
++  return NRF_SUCCESS;
++}
++inline int sd_rand_application_vector_get(uint8_t* bytes, size_t size) {
++  memcpy(bytes, &Bluefruit.random, size); return NRF_SUCCESS;
++}
++inline void bond_remove_key(int, ble_gap_addr_t*) {}
++inline void sd_ble_gatts_rw_authorize_reply(uint16_t, ble_gatts_rw_authorize_reply_params_t*) { ++fake_reads; }
++#include "observer/ObserverTransport.cpp"
++
++namespace observer {
++struct TransportTestAccess {
++  static bool allocated(Transport& t) { return t.log_queue_ || t.line_buffer_; }
++  static bool queued(Transport& t) { return t.log_queue_ && !t.log_queue_->empty(); }
++  static uint64_t nonce(Transport& t) { return t.boot_nonce_; }
++  static uint32_t head(Transport& t) { return t.log_queue_ ? t.log_queue_->headSequence() : 0; }
++  static StatsValues stats(Transport& t) { t.updateStatsSnapshot(); return t.stats_snapshot_.read(); }
++  static const void* queue(Transport& t) { return t.log_queue_; }
++  static void dispose(Transport& t) { t.releaseQueue(); }
++};
++}
++
++namespace {
++bool saved_enabled = false;
++bool saveEnabled(bool enabled) { saved_enabled = enabled; return true; }
++bool savePeer(bool, const observer::PeerIdentity&) { return true; }
++class ObserverProductionLifecycle : public ::testing::Test {
++ protected:
++  observer::Transport t;
++  void SetUp() override {
++    Bluefruit = FakeBluefruit{}; Serial = FakeSerial{}; g_mock_millis = 0;
++    fake_gatt_calls = fake_gatt_status = fake_notifications = 0; saved_enabled = false;
++    fake_writes.clear(); fake_read = nullptr; fake_reads = 0;
++    fake_fail_nothrow_after = -1; fake_nothrow_allocations = 0;
++    t.setPreferenceCallbacks(saveEnabled, savePeer);
++  }
++  void TearDown() override { observer::TransportTestAccess::dispose(t); }
++  void ready(bool pinned = false) {
++    observer::PeerIdentity peer{};
++    t.attachPreferences(false, peer, pinned);
++    Bluefruit.entropy = true;
++    ASSERT_TRUE(t.enable(true)); t.service();
++  }
++  void connect(bool secure = true) {
++    Bluefruit.Advertising.running = false;
++    Bluefruit.connection.live = true;
++    Bluefruit.connection.bond = Bluefruit.connection.secure = secure;
++    Bluefruit.Periph.connect(1); t.service();
++    if (secure) { Bluefruit.Security.secured(1); t.service(); }
++  }
++  void disconnect() {
++    Bluefruit.connection.live = false;
++    const int starts = Bluefruit.Advertising.starts, gatt = fake_gatt_calls;
++    const int allocations = fake_nothrow_allocations;
++    const void* queue = observer::TransportTestAccess::queue(t);
++    Bluefruit.Periph.disconnect(1, 0);
++    EXPECT_EQ(Bluefruit.Advertising.starts, starts);
++    EXPECT_EQ(fake_gatt_calls, gatt);
++    EXPECT_EQ(fake_nothrow_allocations, allocations);
++    EXPECT_EQ(observer::TransportTestAccess::queue(t), queue);
++    t.service();
++  }
++};
++TEST_F(ObserverProductionLifecycle, DefaultOffNeverStartsCoreOrAllocates) {
++  EXPECT_FALSE(t.begin("off", false)); t.service(); EXPECT_TRUE(t.enable(false)); t.service();
++  EXPECT_EQ(Bluefruit.begins, 0); EXPECT_EQ(Bluefruit.entropy_calls, 0);
++  EXPECT_EQ(fake_gatt_calls, 0); EXPECT_EQ(Bluefruit.Advertising.starts, 0);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++}
++TEST_F(ObserverProductionLifecycle, CoreBeforeEntropyAndDelayedReadinessDoesNotUndoOptin) {
++  t.attachPreferences(false, observer::PeerIdentity{}, true);
++  ASSERT_TRUE(t.enable(true));
++  EXPECT_TRUE(saved_enabled); EXPECT_EQ(Bluefruit.begins, 1);
++  EXPECT_EQ(Bluefruit.entropy_before_core, 0);
++  for (int i = 0; i < 20; ++i) t.service();
++  EXPECT_LE(Bluefruit.entropy_calls, 1); EXPECT_TRUE(saved_enabled);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  EXPECT_FALSE(Bluefruit.Advertising.running);
++  const uint8_t line[] = "RAW pending\n"; t.writeLog(line, sizeof(line)-1);
++  EXPECT_EQ(observer::TransportTestAccess::nonce(t), 0U); EXPECT_EQ(fake_notifications, 0);
++  Bluefruit.entropy = true; g_mock_millis += 100; t.service();
++  EXPECT_TRUE(observer::TransportTestAccess::allocated(t));
++  EXPECT_EQ(observer::TransportTestAccess::nonce(t), 42U);
++  EXPECT_TRUE(Bluefruit.Advertising.running);
++  t.writeLog(line, sizeof(line)-1); EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++}
++TEST_F(ObserverProductionLifecycle, HardCoreFailureRollsBack) {
++  Bluefruit.begin_ok = false;
++  EXPECT_FALSE(t.enable(true)); EXPECT_FALSE(saved_enabled);
++  EXPECT_FALSE(t.initialized()); EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  EXPECT_EQ(Bluefruit.entropy_calls, 0); EXPECT_FALSE(Bluefruit.Advertising.running);
++}
++
++TEST_F(ObserverProductionLifecycle, PreEntropyLossReservesIdentityAndDiscardsPartialLineTail) {
++  ASSERT_TRUE(t.enable(true));
++  const uint8_t pending[] = "RAW lost\nRAW par";
++  t.writeLog(pending, sizeof(pending) - 1);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  Bluefruit.entropy = true; g_mock_millis += 100; t.service();
++  const uint8_t resumed[] = "tial\nOK\n";
++  t.writeLog(resumed, sizeof(resumed) - 1);
++  EXPECT_EQ(observer::TransportTestAccess::head(t), 3U);
++  const auto stats = observer::TransportTestAccess::stats(t);
++  EXPECT_EQ(stats.unavailable_records, 2U);
++  EXPECT_EQ(stats.unavailable_bytes, 21U);
++  EXPECT_EQ(stats.truncated_records, 0U);
++  EXPECT_EQ(stats.evicted_records, 0U);
++}
++TEST_F(ObserverProductionLifecycle, GattFailureRollsBackWithoutRetryingPartialRegistration) {
++  fake_gatt_status = 1; Bluefruit.entropy = true;
++  EXPECT_FALSE(t.enable(true)); EXPECT_FALSE(saved_enabled);
++  const int calls = fake_gatt_calls;
++  t.service(); EXPECT_FALSE(t.enable(true)); EXPECT_EQ(fake_gatt_calls, calls);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++}
++TEST_F(ObserverProductionLifecycle, QueueAllocationFailureRollsBackAfterEntropy) {
++  ASSERT_TRUE(t.enable(true)); Bluefruit.entropy = true; fake_fail_nothrow_after = 0;
++  t.service(); EXPECT_FALSE(saved_enabled); EXPECT_FALSE(t.initialized());
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  EXPECT_FALSE(Bluefruit.Advertising.running); EXPECT_FALSE(t.enable(true));
++}
++TEST_F(ObserverProductionLifecycle, LineAllocationFailureAlsoReleasesQueue) {
++  ASSERT_TRUE(t.enable(true)); Bluefruit.entropy = true; fake_fail_nothrow_after = 1;
++  t.service(); EXPECT_FALSE(saved_enabled); EXPECT_FALSE(t.initialized());
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  EXPECT_FALSE(Bluefruit.Advertising.running);
++}
++TEST_F(ObserverProductionLifecycle, SecureDisconnectRestartsAndRetainsBacklog) {
++  ready(true); connect();
++  const uint8_t line[] = "RAW backlog\n"; t.writeLog(line, sizeof(line)-1);
++  disconnect(); EXPECT_TRUE(Bluefruit.Advertising.running);
++  EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++  connect(); g_mock_millis += 1000; t.service(); EXPECT_GT(fake_notifications, 0);
++}
++TEST_F(ObserverProductionLifecycle, EnrollmentPinsThenDisconnectRestartsWithoutUnbondedData) {
++  ready(); ASSERT_TRUE(t.beginEnrollment()); connect(false);
++  const uint8_t pin[] = "123456";
++  EXPECT_TRUE(Bluefruit.Security.mitm); EXPECT_TRUE(Bluefruit.Security.display);
++  ASSERT_TRUE(Bluefruit.Security.passkey(1, pin, false));
++  EXPECT_EQ(Serial.output.find("123456"), std::string::npos);
++  t.service(); EXPECT_NE(Serial.output.find("123456"), std::string::npos);
++  Bluefruit.connection.bond = Bluefruit.connection.secure = true;
++  Bluefruit.Security.pair(1, 0); EXPECT_TRUE(t.enrollmentOpen());
++  t.service(); EXPECT_FALSE(t.enrollmentOpen());
++  EXPECT_FALSE(Bluefruit.Security.passkey(1, pin, false));
++  disconnect(); EXPECT_TRUE(Bluefruit.Advertising.running);
++  const uint8_t line[] = "RAW backlog\n"; t.writeLog(line, sizeof(line)-1);
++  connect(false); g_mock_millis += 1000; t.service(); EXPECT_EQ(fake_notifications, 0);
++  uint8_t key_command[] = "get prv.key";
++  ASSERT_EQ(fake_writes.size(), 2U);
++  fake_writes[0](1, nullptr, key_command, sizeof(key_command)-1);
++  char command[96]; EXPECT_FALSE(t.takeCommand(command, sizeof(command)));
++  ble_gatts_evt_read_t request{}; ASSERT_NE(fake_read, nullptr);
++  fake_read(1, nullptr, &request); EXPECT_EQ(fake_reads, 0);
++  disconnect(); connect(); g_mock_millis += 1000; t.service(); EXPECT_GT(fake_notifications, 0);
++}
++TEST_F(ObserverProductionLifecycle, DisablePendingDisconnectNeverRestarts) {
++  ready(true); connect(); ASSERT_TRUE(t.enable(false));
++  EXPECT_FALSE(Bluefruit.Advertising.running);
++  EXPECT_TRUE(observer::TransportTestAccess::allocated(t));
++  disconnect(); EXPECT_FALSE(Bluefruit.Advertising.running);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  g_mock_millis += 1000; t.service(); EXPECT_FALSE(Bluefruit.Advertising.running);
++}
++TEST_F(ObserverProductionLifecycle, DisableWhileWaitingForEntropyStopsRetriesAndReenableRecovers) {
++  ASSERT_TRUE(t.enable(true)); t.service();
++  ASSERT_TRUE(t.enable(false)); const int calls = Bluefruit.entropy_calls;
++  g_mock_millis += 1000; t.service(); EXPECT_EQ(Bluefruit.entropy_calls, calls);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t));
++  ASSERT_TRUE(t.enable(true)); Bluefruit.entropy = true; t.service();
++  EXPECT_EQ(Bluefruit.begins, 1); EXPECT_TRUE(observer::TransportTestAccess::allocated(t));
++}
++TEST_F(ObserverProductionLifecycle, ZeroEntropyNeverCreatesPredictableSession) {
++  ASSERT_TRUE(t.enable(true)); Bluefruit.entropy = true; Bluefruit.random = 0;
++  t.service(); EXPECT_TRUE(saved_enabled);
++  EXPECT_FALSE(observer::TransportTestAccess::allocated(t)); EXPECT_FALSE(t.beginEnrollment());
++  g_mock_millis += 100; Bluefruit.random = 43; t.service();
++  EXPECT_EQ(observer::TransportTestAccess::nonce(t), 43U);
++  EXPECT_TRUE(observer::TransportTestAccess::allocated(t));
++}
++TEST_F(ObserverProductionLifecycle, EnrollmentExpiresAndUsbLossSuppressesPasskey) {
++  ready(); ASSERT_TRUE(t.beginEnrollment()); connect(false);
++  const uint8_t pin[] = "123456";
++  ASSERT_TRUE(Bluefruit.Security.passkey(1, pin, false)); Serial.open = false;
++  t.service(); EXPECT_FALSE(t.enrollmentOpen());
++  EXPECT_EQ(Serial.output.find("123456"), std::string::npos);
++  EXPECT_FALSE(Bluefruit.Security.passkey(1, pin, false));
++  disconnect(); Serial.open = true; ASSERT_TRUE(t.beginEnrollment());
++  g_mock_millis += 60000; t.service(); EXPECT_FALSE(t.enrollmentOpen());
++  EXPECT_FALSE(Bluefruit.Advertising.running); // No pinned peer, no open window.
++}
++} // namespace
++
++namespace {
++
++TEST(ObserverStreamQueue, PreservesOrderedBytesAcrossEnqueueAndDequeue) {
++  observer::StreamQueue<16> queue(true);
++  const uint8_t first[] = {'R', 'A', 'W', '\r', '\n'};
++  const uint8_t second[] = {'R', 'X', '\n'};
++
++  EXPECT_EQ(queue.enqueue(first, sizeof(first)), sizeof(first));
++  EXPECT_EQ(queue.enqueue(second, sizeof(second)), sizeof(second));
++
++  std::array<uint8_t, 8> output{};
++  EXPECT_EQ(queue.dequeue(output.data(), output.size()), output.size());
++  EXPECT_EQ(std::vector<uint8_t>(output.begin(), output.end()),
++            (std::vector<uint8_t>{'R', 'A', 'W', '\r', '\n', 'R', 'X', '\n'}));
++}
++
++TEST(ObserverStreamQueue, CountsOverflowWithoutPartiallyAppendingARecord) {
++  observer::StreamQueue<4> queue(true);
++  const uint8_t kept[] = {1, 2, 3};
++  const uint8_t dropped[] = {4, 5};
++
++  EXPECT_EQ(queue.enqueue(kept, sizeof(kept)), sizeof(kept));
++  EXPECT_EQ(queue.enqueue(dropped, sizeof(dropped)), 0U);
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(dropped));
++
++  std::array<uint8_t, 4> output{};
++  EXPECT_EQ(queue.dequeue(output.data(), output.size()), sizeof(kept));
++  EXPECT_EQ(std::vector<uint8_t>(output.begin(), output.begin() + sizeof(kept)),
++            (std::vector<uint8_t>{1, 2, 3}));
++}
++
++TEST(ObserverStreamQueue, WrapsWithoutReorderingBytes) {
++  observer::StreamQueue<5> queue(true);
++  const uint8_t first[] = {1, 2, 3, 4};
++  const uint8_t second[] = {5, 6, 7};
++  std::array<uint8_t, 2> first_output{};
++
++  ASSERT_EQ(queue.enqueue(first, sizeof(first)), sizeof(first));
++  ASSERT_EQ(queue.dequeue(first_output.data(), first_output.size()), first_output.size());
++  ASSERT_EQ(queue.enqueue(second, sizeof(second)), sizeof(second));
++
++  std::array<uint8_t, 5> output{};
++  EXPECT_EQ(queue.dequeue(output.data(), output.size()), 5U);
++  EXPECT_EQ(std::vector<uint8_t>(output.begin(), output.end()),
++            (std::vector<uint8_t>{3, 4, 5, 6, 7}));
++}
++
++TEST(ObserverStreamQueue, ObserverOffDoesNotRetainOrCountBytes) {
++  observer::StreamQueue<8> queue(false);
++  const uint8_t bytes[] = {'R', 'A', 'W', '\r', '\n'};
++
++  EXPECT_EQ(queue.enqueue(bytes, sizeof(bytes)), sizeof(bytes));
++  EXPECT_TRUE(queue.empty());
++  EXPECT_EQ(queue.droppedRecords(), 0U);
++  EXPECT_EQ(queue.droppedBytes(), 0U);
++}
++
++TEST(ObserverStreamQueue, PreservesClassicRawThenRxThenTxBytesWithoutSynthesizingTxRaw) {
++  observer::StreamQueue<128> queue(true);
++  const uint8_t raw[] = "12:00:00 - 1/1/2026 U RAW: AABB\r\n";
++  const uint8_t rx[] = "12:00:00 - 1/1/2026 U: RX, len=2\r\n";
++  const uint8_t tx[] = "12:00:00 - 1/1/2026 U: TX, len=2\r\n";
++  std::vector<uint8_t> expected;
++  expected.insert(expected.end(), raw, raw + sizeof(raw) - 1);
++  expected.insert(expected.end(), rx, rx + sizeof(rx) - 1);
++  expected.insert(expected.end(), tx, tx + sizeof(tx) - 1);
++
++  ASSERT_EQ(queue.enqueue(raw, sizeof(raw) - 1), sizeof(raw) - 1);
++  ASSERT_EQ(queue.enqueue(rx, sizeof(rx) - 1), sizeof(rx) - 1);
++  ASSERT_EQ(queue.enqueue(tx, sizeof(tx) - 1), sizeof(tx) - 1);
++
++  std::vector<uint8_t> output(expected.size());
++  EXPECT_EQ(queue.dequeue(output.data(), output.size()), expected.size());
++  EXPECT_EQ(output, expected);
++}
++
++TEST(ObserverLineBuffer, CommitsClassicLogOnlyWhenNewlineCompletesTheLine) {
++  observer::StreamQueue<64> queue(true);
++  observer::LineBuffer<64, 64> mirror(queue);
++  const uint8_t raw_prefix[] = "RAW: AABB";
++  const uint8_t raw_suffix[] = "\r\n";
++
++  EXPECT_EQ(mirror.write(raw_prefix, sizeof(raw_prefix) - 1), sizeof(raw_prefix) - 1);
++  EXPECT_TRUE(queue.empty());
++  EXPECT_EQ(mirror.write(raw_suffix, sizeof(raw_suffix) - 1), sizeof(raw_suffix) - 1);
++
++  std::array<uint8_t, 11> output{};
++  EXPECT_EQ(queue.dequeue(output.data(), output.size()), output.size());
++  EXPECT_EQ(std::vector<uint8_t>(output.begin(), output.end()),
++            (std::vector<uint8_t>{'R', 'A', 'W', ':', ' ', 'A', 'A', 'B', 'B', '\r', '\n'}));
++}
++
++TEST(ObserverLineBuffer, DropsWholeLineWhenQueueCannotFitCompletedClassicLog) {
++  observer::StreamQueue<8> queue(true);
++  observer::LineBuffer<32, 8> mirror(queue);
++  const uint8_t line[] = "RAW: AABB\r\n";
++
++  EXPECT_EQ(mirror.write(line, sizeof(line) - 1), sizeof(line) - 1);
++  EXPECT_TRUE(queue.empty());
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(line) - 1);
++}
++
++TEST(ObserverCommand, AcceptsOnlyCanonicalUint32TimeAndFixedReadAllowlist) {
++  uint32_t epoch = 0;
++  EXPECT_TRUE(observer::parseCanonicalEpoch("time 1735689600", epoch));
++  EXPECT_EQ(epoch, 1735689600U);
++  EXPECT_FALSE(observer::parseCanonicalEpoch("time 01735689600", epoch));
++  EXPECT_FALSE(observer::parseCanonicalEpoch("time 1 extra", epoch));
++  EXPECT_FALSE(observer::parseCanonicalEpoch("time 4294967296", epoch));
++  EXPECT_FALSE(observer::parseCanonicalEpoch("time reboot", epoch));
++  EXPECT_TRUE(observer::isAllowedReadCommand("get prv.key"));
++  EXPECT_TRUE(observer::isAllowedReadCommand("stats-packets"));
++  EXPECT_TRUE(observer::isAllowedReadCommand("ver"));
++  EXPECT_TRUE(observer::isAllowedReadCommand("board"));
++  EXPECT_FALSE(observer::isAllowedReadCommand("get name extra"));
++  EXPECT_FALSE(observer::isAllowedReadCommand("start ota"));
++}
++
++TEST(ObserverRecordQueue, ReassemblyRejectsMidLineNotificationFailureBeforeNextLine) {
++  observer::RecordQueue<64, 4> queue(true);
++  const uint8_t raw[] = "RAW: AABB\r\n";
++  const uint8_t rx[] = "RX: CCDD\r\n";
++  ASSERT_TRUE(queue.enqueue(raw, sizeof(raw) - 1));
++  ASSERT_TRUE(queue.enqueue(rx, sizeof(rx) - 1));
++
++  observer::RecordFragment first{};
++  ASSERT_TRUE(queue.peek(first, 5));
++  EXPECT_EQ(first.sequence, 1U);
++  EXPECT_EQ(first.offset, 0U);
++  EXPECT_EQ(first.length, 5U);
++  queue.consume(first.length);  // The first notification reached the Pi.
++  queue.dropHeadRecord();       // A later notification failed.
++
++  observer::RecordFragment next{};
++  ASSERT_TRUE(queue.peek(next, 5));
++  EXPECT_EQ(next.sequence, 2U);
++  EXPECT_EQ(next.offset, 0U);
++  EXPECT_EQ(next.total_length, sizeof(rx) - 1);
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(raw) - 1);
++}
++
++TEST(ObserverRecordQueue, CapacityEvictsOldestCompleteRecordAndReportsLoss) {
++  observer::RecordQueue<8, 2> queue(true);
++  const uint8_t first[] = "RAW\n";
++  const uint8_t second[] = "RX\n";
++  const uint8_t third[] = "TX\n";
++
++  ASSERT_TRUE(queue.enqueue(first, sizeof(first) - 1));
++  ASSERT_TRUE(queue.enqueue(second, sizeof(second) - 1));
++  EXPECT_TRUE(queue.enqueue(third, sizeof(third) - 1));
++
++  observer::RecordFragment head{};
++  ASSERT_TRUE(queue.peek(head, 8));
++  EXPECT_EQ(std::vector<uint8_t>(head.bytes, head.bytes + head.length),
++            (std::vector<uint8_t>{'R', 'X', '\n'}));
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(first) - 1);
++  EXPECT_EQ(queue.evictedRecords(), 1U);
++  EXPECT_EQ(queue.evictedBytes(), sizeof(first) - 1);
++}
++
++TEST(ObserverRecordQueue, OverlongClassicLineIsCountedAsTruncationNotEviction) {
++  observer::RecordQueue<16, 4> queue(true, 7);
++  observer::LineBuffer<4, 16, observer::RecordQueue<16, 4>> line_buffer(queue);
++  const uint8_t line[] = "abcde\n";
++
++  ASSERT_EQ(line_buffer.write(line, sizeof(line) - 1), sizeof(line) - 1);
++  EXPECT_TRUE(queue.empty());
++  EXPECT_EQ(queue.evictedRecords(), 0U);
++  EXPECT_EQ(queue.evictedBytes(), 0U);
++  EXPECT_EQ(queue.truncatedRecords(), 1U);
++  EXPECT_EQ(queue.truncatedBytes(), sizeof(line) - 1);
++}
++
++struct OverflowReporter {
++  size_t bytes = 0;
++  void drop(size_t count) { bytes += count; }
++};
++
++TEST(ObserverLineBuffer, BoundaryNewlineAndCrlfDropOnlyOverlongRecords) {
++  for (const std::string ending : {std::string("\n"), std::string("\r\n")}) {
++    observer::RecordQueue<1024, 8> queue(true, 7);
++    observer::LineBuffer<256, 1024, decltype(queue)> buffer(queue);
++    const std::string input = std::string(256, 'x') + ending + "OK\n" +
++        std::string(300, 'y') + ending + "YES\r\n";
++    for (const uint8_t byte : input) buffer.write(byte);
++    EXPECT_EQ(queue.truncatedRecords(), 2U);
++    EXPECT_EQ(queue.truncatedBytes(), 556U + ending.size() * 2);
++    EXPECT_EQ(queue.size(), 2U);
++    observer::RecordFragment head{};
++    ASSERT_TRUE(queue.peek(head, 256));
++    EXPECT_EQ(std::string(reinterpret_cast<const char*>(head.bytes), head.length), "OK\n");
++    EXPECT_EQ(head.sequence, 2U);
++    EXPECT_FALSE(queue.acknowledge(7, 1)); // missing identity is never an ACK
++    EXPECT_EQ(queue.size(), 2U);
++    ASSERT_TRUE(queue.acknowledge(7, head.sequence));
++    ASSERT_TRUE(queue.peek(head, 256));
++    EXPECT_EQ(std::string(reinterpret_cast<const char*>(head.bytes), head.length), "YES\r\n");
++    EXPECT_EQ(head.sequence, 4U);
++  }
++}
++
++TEST(ObserverRecordQueue, RejectedRecordsReserveIdentityWithoutAcknowledgingOrMovingHead) {
++  observer::QueueSequenceState sequence;
++  observer::RecordQueue<8, 4> queue(true, 9, sequence);
++  const uint8_t line[] = "OK\n";
++  ASSERT_TRUE(queue.enqueue(line, 3));
++  queue.drop(257);
++  EXPECT_FALSE(queue.acknowledge(9, 2));
++  EXPECT_EQ(queue.headSequence(), 1U);
++  EXPECT_EQ(queue.size(), 1U);
++  ASSERT_TRUE(queue.acknowledge(9, 1));
++  EXPECT_FALSE(queue.enqueue(line, 9)); // cannot fit even an empty queue
++  EXPECT_FALSE(queue.enqueue(nullptr, 3));
++  ASSERT_TRUE(queue.enqueue(line, 3));
++  EXPECT_EQ(queue.headSequence(), 5U);
++  EXPECT_EQ(sequence.next(), 6U);
++  EXPECT_EQ(queue.truncatedRecords(), 3U);
++  EXPECT_EQ(queue.unavailableRecords(), 0U);
++}
++
++TEST(ObserverRecordQueue, LostLastIdentityExhaustsUntilFreshNonceAndDoesNotWrap) {
++  observer::QueueSequenceState sequence;
++  sequence.advance(UINT32_MAX - 1);
++  observer::RecordQueue<8, 4> queue(true, 9, sequence);
++  queue.drop(257);
++  EXPECT_TRUE(queue.sequenceExhausted());
++  const uint8_t line[] = "OK\n";
++  EXPECT_FALSE(queue.enqueue(line, 3));
++  queue.drop(258);
++  EXPECT_TRUE(queue.sequenceExhausted());
++  EXPECT_EQ(sequence.next(), 0U);
++  EXPECT_FALSE(queue.setBootNonce(9));
++  EXPECT_FALSE(queue.setBootNonce(0));
++  ASSERT_TRUE(queue.setBootNonce(10));
++  ASSERT_TRUE(queue.enqueue(line, 3));
++  EXPECT_EQ(queue.headSequence(), 1U);
++  EXPECT_EQ(queue.truncatedRecords(), 2U);
++  EXPECT_EQ(queue.unavailableRecords(), 1U);
++}
++
++TEST(ObserverRecordQueue, LineTruncationUsesIndependentLossReporter) {
++  observer::RecordQueue<16, 4> queue(true, 7);
++  OverflowReporter truncations;
++  observer::LineBuffer<4, 16, observer::RecordQueue<16, 4>, OverflowReporter> line_buffer(queue, truncations);
++  const uint8_t line[] = "abcde\n";
++
++  ASSERT_EQ(line_buffer.write(line, sizeof(line) - 1), sizeof(line) - 1);
++  EXPECT_TRUE(queue.empty());
++  EXPECT_EQ(truncations.bytes, sizeof(line) - 1);
++  EXPECT_EQ(queue.droppedRecords(), 0U);
++  EXPECT_EQ(queue.evictedRecords(), 0U);
++}
++
++TEST(ObserverRecordQueue, WraparoundEvictsWholeHeadAndKeepsContiguousCompleteRecords) {
++  observer::RecordQueue<16, 4> queue(true, 8);
++  const uint8_t first[] = "AAAA\n";
++  const uint8_t second[] = "BBBB\n";
++  const uint8_t third[] = "CCCC\n";
++  const uint8_t fourth[] = "DDDD\n";
++  const uint8_t fifth[] = "EEEE\n";
++  ASSERT_TRUE(queue.enqueue(first, sizeof(first) - 1));
++  ASSERT_TRUE(queue.enqueue(second, sizeof(second) - 1));
++  ASSERT_TRUE(queue.acknowledge(8, 1));
++  ASSERT_TRUE(queue.enqueue(third, sizeof(third) - 1));
++  ASSERT_TRUE(queue.enqueue(fourth, sizeof(fourth) - 1));
++  ASSERT_TRUE(queue.enqueue(fifth, sizeof(fifth) - 1));
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(second) - 1);
++  observer::RecordFragment head{};
++  ASSERT_TRUE(queue.peek(head, 16));
++  EXPECT_EQ(head.sequence, 3U);
++  EXPECT_EQ(std::vector<uint8_t>(head.bytes, head.bytes + head.length),
++            (std::vector<uint8_t>(third, third + sizeof(third) - 1)));
++}
++
++TEST(ObserverRecordQueue, SuccessfulFragmentSendRetainsHeadUntilMatchingAck) {
++  observer::RecordQueue<32, 2> queue(true);
++  const uint8_t record[] = "RAW: AABB\r\n";
++  ASSERT_TRUE(queue.enqueue(record, sizeof(record) - 1));
++
++  observer::RecordFragment sent{};
++  ASSERT_TRUE(queue.peek(sent, 4));
++  queue.consume(sent.length);
++
++  observer::RecordFragment retry{};
++  ASSERT_TRUE(queue.peek(retry, 4));
++  EXPECT_EQ(retry.sequence, sent.sequence);
++  EXPECT_EQ(retry.offset, sent.length);
++  EXPECT_EQ(retry.total_length, sizeof(record) - 1);
++  queue.restartHead();
++  ASSERT_TRUE(queue.peek(retry, 4));
++  EXPECT_EQ(retry.offset, 0U);
++  EXPECT_TRUE(queue.acknowledge(retry.boot_nonce, retry.sequence));
++  EXPECT_TRUE(queue.empty());
++}
++
++TEST(ObserverRecordQueue, EvictingPartiallySentHeadPreservesNextWholeRecord) {
++  observer::RecordQueue<32, 2> queue(true);
++  const uint8_t first[] = "RAW: AABB\r\n";
++  const uint8_t second[] = "RX: CCDD\r\n";
++  const uint8_t third[] = "TX: EEFF\r\n";
++  ASSERT_TRUE(queue.enqueue(first, sizeof(first) - 1));
++  ASSERT_TRUE(queue.enqueue(second, sizeof(second) - 1));
++
++  observer::RecordFragment partial{};
++  ASSERT_TRUE(queue.peek(partial, 4));
++  queue.consume(partial.length);
++  ASSERT_TRUE(queue.enqueue(third, sizeof(third) - 1));
++
++  observer::RecordFragment head{};
++  ASSERT_TRUE(queue.peek(head, 32));
++  EXPECT_EQ(std::vector<uint8_t>(head.bytes, head.bytes + head.length),
++            (std::vector<uint8_t>(second, second + sizeof(second) - 1)));
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(first) - 1);
++  EXPECT_EQ(queue.evictedRecords(), 1U);
++  EXPECT_EQ(queue.evictedBytes(), sizeof(first) - 1);
++}
++
++TEST(ObserverRecordQueue, LateNotifyCompletionCannotAdvanceReplacementHeadAfterEviction) {
++  observer::RecordQueue<24, 2> queue(true, 19);
++  const uint8_t first[] = "AAAAAAAA\n";
++  const uint8_t second[] = "BBBBBBBB\n";
++  const uint8_t third[] = "CCCCCCCC\n";
++  ASSERT_TRUE(queue.enqueue(first, sizeof(first) - 1));
++  ASSERT_TRUE(queue.enqueue(second, sizeof(second) - 1));
++  observer::RecordFragment sent{};
++  ASSERT_TRUE(queue.peek(sent, 4));
++  ASSERT_TRUE(queue.enqueue(third, sizeof(third) - 1));  // evicts the in-flight head
++  EXPECT_FALSE(queue.consume(sent.boot_nonce, sent.sequence, sent.length));
++  observer::RecordFragment head{};
++  ASSERT_TRUE(queue.peek(head, 4));
++  EXPECT_EQ(head.sequence, 2U);
++  EXPECT_EQ(head.offset, 0U);
++}
++
++TEST(ObserverRecordQueue, RetainsDisconnectedRecordsUntilRebootButStartsNewQueueEmpty) {
++  observer::RecordQueue<32, 4> disconnected(true, 0x0123456789abcdefULL);
++  const uint8_t record[] = "RX\r\n";
++  ASSERT_TRUE(disconnected.enqueue(record, sizeof(record) - 1));
++  observer::RecordFragment fragment{};
++  ASSERT_TRUE(disconnected.peek(fragment, 4));
++  EXPECT_EQ(fragment.sequence, 1U);
++
++  observer::RecordQueue<32, 4> after_reboot(true, 0xfedcba9876543210ULL);
++  EXPECT_TRUE(after_reboot.empty());
++  EXPECT_EQ(after_reboot.bootNonce(), 0xfedcba9876543210ULL);
++  EXPECT_EQ(after_reboot.droppedRecords(), 0U);
++  EXPECT_EQ(after_reboot.droppedBytes(), 0U);
++}
++
++TEST(ObserverProtocol, EncodesSixteenByteLittleEndianFrameWithFourByteMtu20Payload) {
++  const uint8_t record[] = {'R', 'A', 'W', '\r', '\n'};
++  uint8_t frame[20]{};
++  const auto encoded = observer::encodeFrame(0x0123456789abcdefULL, 0x78563412U,
++                                             sizeof(record), 0, record, 4, frame,
++                                             sizeof(frame));
++  ASSERT_EQ(encoded, 20U);
++  EXPECT_EQ(std::vector<uint8_t>(frame, frame + 20),
++            (std::vector<uint8_t>{0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01,
++                                  0x12, 0x34, 0x56, 0x78, 5, 0, 0, 0,
++                                  'R', 'A', 'W', '\r'}));
++}
++
++TEST(ObserverProtocol, FormatsCanonicalAckAndRejectsMalformedOrStaleAck) {
++  char ack[96]{};
++  observer::formatAck(0x0123456789abcdefULL, 1234567890U, ack, sizeof(ack));
++  EXPECT_STREQ(ack, "ack 0123456789abcdef 1234567890");
++  observer::Ack parsed{};
++  EXPECT_TRUE(observer::parseAck(ack, strlen(ack), parsed));
++  EXPECT_EQ(parsed.boot_nonce, 0x0123456789abcdefULL);
++  EXPECT_EQ(parsed.sequence, 1234567890U);
++  EXPECT_TRUE(observer::parseAck("ack 0000000000000000 1", strlen("ack 0000000000000000 1"), parsed));
++  observer::RecordQueue<32, 2> zero_nonce_queue(true, 0);
++  const uint8_t zero_record[] = "x\n";
++  ASSERT_TRUE(zero_nonce_queue.enqueue(zero_record, sizeof(zero_record) - 1));
++  EXPECT_TRUE(zero_nonce_queue.acknowledge(parsed.boot_nonce, parsed.sequence));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789ABCDEf 1", 22, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef 01", 24, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef +1", 24, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef 1\r", 23, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef 1 ", 23, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef 4294967296", 31, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef 1", 96, parsed));
++  EXPECT_FALSE(observer::parseAck("ack 0123456789abcdef 1", strlen("ack 0123456789abcdef 1") + 1, parsed));
++  EXPECT_TRUE(observer::parseAck("ack 0123456789abcdef 4294967295", strlen("ack 0123456789abcdef 4294967295"), parsed));
++  EXPECT_EQ(parsed.sequence, UINT32_MAX);
++}
++
++TEST(ObserverProtocol, FragmentFramesRemainOrderedAndSequenceIdentifiesEveryFragment) {
++  const uint8_t record[] = "ABCDEFGH";
++  uint8_t first[20]{};
++  uint8_t second[20]{};
++  ASSERT_EQ(observer::encodeFrame(7, 1, 8, 0, record, 4, first, sizeof(first)), 20U);
++  ASSERT_EQ(observer::encodeFrame(7, 1, 8, 4, record + 4, 4, second, sizeof(second)), 20U);
++  EXPECT_EQ(first[8], second[8]);
++  EXPECT_EQ(first[12], second[12]);
++  EXPECT_EQ(first[14], 0);
++  EXPECT_EQ(second[14], 4);
++  EXPECT_EQ(std::vector<uint8_t>(first + 16, first + 20), (std::vector<uint8_t>{'A','B','C','D'}));
++  EXPECT_EQ(std::vector<uint8_t>(second + 16, second + 20), (std::vector<uint8_t>{'E','F','G','H'}));
++}
++
++TEST(ObserverRecordQueue, AckRequiresExactQueueHeadIdentityAndDuplicateCannotEvictNext) {
++  observer::RecordQueue<32, 4> queue(true, 0x0123456789abcdefULL);
++  const uint8_t first[] = "RAW\n";
++  const uint8_t second[] = "RX\n";
++  ASSERT_TRUE(queue.enqueue(first, sizeof(first) - 1));
++  ASSERT_TRUE(queue.enqueue(second, sizeof(second) - 1));
++  EXPECT_FALSE(queue.acknowledge(0, 1));
++  EXPECT_FALSE(queue.acknowledge(0x0123456789abcdefULL, 2));
++  EXPECT_FALSE(queue.acknowledge(0x0123456789abcdefULL, 0));
++  EXPECT_TRUE(queue.acknowledge(0x0123456789abcdefULL, 1));
++  EXPECT_FALSE(queue.acknowledge(0x0123456789abcdefULL, 1));
++  observer::RecordFragment head{};
++  ASSERT_TRUE(queue.peek(head, 32));
++  EXPECT_EQ(head.sequence, 2U);
++}
++
++TEST(ObserverRecordQueue, RecreatedQueuePreservesSequenceAndRejectsDelayedAck) {
++  const uint64_t nonce = 0x1122334455667788ULL;
++  observer::QueueSequenceState sequence;
++  const uint8_t old_line[] = "old\n";
++  observer::RecordQueue<32, 4> before_disable(true, nonce, sequence);
++  ASSERT_TRUE(before_disable.enqueue(old_line, sizeof(old_line) - 1));
++  const uint32_t old_sequence = before_disable.headSequence();
++
++  observer::RecordQueue<32, 4> after_enable(true, nonce, sequence);
++  const uint8_t new_line[] = "new\n";
++  ASSERT_TRUE(after_enable.enqueue(new_line, sizeof(new_line) - 1));
++
++  EXPECT_NE(after_enable.headSequence(), old_sequence);
++  EXPECT_FALSE(after_enable.acknowledge(nonce, old_sequence));
++  EXPECT_EQ(after_enable.size(), 1U);
++}
++
++TEST(ObserverRecordQueue, SequenceExhaustionStopsAdmissionUntilFreshNonceWithoutRelabelingBacklog) {
++  observer::RecordQueue<32, 4> queue(true, 9, UINT32_MAX);
++  const uint8_t record[] = "x\n";
++  ASSERT_TRUE(queue.enqueue(record, sizeof(record) - 1));
++  observer::RecordFragment before{};
++  ASSERT_TRUE(queue.peek(before, 32));
++  EXPECT_EQ(before.sequence, UINT32_MAX);
++  EXPECT_FALSE(queue.enqueue(record, sizeof(record) - 1));
++  EXPECT_EQ(queue.unavailableRecords(), 1U);
++  EXPECT_EQ(queue.unavailableBytes(), sizeof(record) - 1);
++  EXPECT_EQ(queue.truncatedRecords(), 0U);
++  EXPECT_EQ(queue.evictedRecords(), 0U);
++  queue.setBootNonce(10);  // loop-side fresh entropy, while the old head is retained
++  ASSERT_TRUE(queue.enqueue(record, sizeof(record) - 1));
++  ASSERT_TRUE(queue.peek(before, 32));
++  EXPECT_EQ(before.boot_nonce, 9U);
++  EXPECT_TRUE(queue.acknowledge(9, UINT32_MAX));
++  observer::RecordFragment after{};
++  ASSERT_TRUE(queue.peek(after, 32));
++  EXPECT_EQ(after.boot_nonce, 10U);
++  EXPECT_EQ(after.sequence, 1U);
++  EXPECT_FALSE(queue.acknowledge(9, 1));
++}
++
++TEST(ObserverConnectionAdmission, UnapprovedPeerExpiresAndPinnedPeerDoesNot) {
++  observer::ConnectionAdmission admission(5000);
++  const observer::PeerIdentity pinned{1, {1, 2, 3, 4, 5, 6}};
++  const observer::PeerIdentity foreign{1, {6, 5, 4, 3, 2, 1}};
++  ASSERT_TRUE(admission.connected(50, 100));
++  EXPECT_FALSE(admission.authorize(50, foreign, pinned));
++  EXPECT_FALSE(admission.expired(5099));
++  uint16_t disconnect_handle = 0;
++  EXPECT_FALSE(admission.takeDisconnect(5099, disconnect_handle));
++  EXPECT_TRUE(admission.takeDisconnect(5100, disconnect_handle));
++  EXPECT_EQ(disconnect_handle, 50);
++
++  ASSERT_TRUE(admission.connected(51, 200));
++  EXPECT_TRUE(admission.authorize(51, pinned, pinned));
++  EXPECT_FALSE(admission.takeDisconnect(10000, disconnect_handle));
++  EXPECT_TRUE(admission.authorized());
++}
++
++TEST(ObserverTransportCallbacks, PendingCallbackBlocksQueueReleaseUntilLoopConsumesIt) {
++  observer::CallbackEvents events;
++  ASSERT_TRUE(events.postDisconnect(61));
++  EXPECT_FALSE(events.safeToReleaseQueue(false, 0xFFFF));
++
++  uint16_t disconnected_handle = 0;
++  ASSERT_TRUE(events.takeDisconnect(disconnected_handle));
++  EXPECT_EQ(disconnected_handle, 61);
++  EXPECT_TRUE(events.safeToReleaseQueue(false, 0xFFFF));
++}
++
++TEST(ObserverTransportCallbacks, PendingAdmissionAlsoBlocksDisableTimeQueueRelease) {
++  observer::CallbackEvents events;
++  EXPECT_FALSE(events.safeToReleaseQueue(false, 0xFFFF, true));
++  EXPECT_TRUE(events.safeToReleaseQueue(false, 0xFFFF, false));
++}
++
++TEST(ObserverTransportCallbacks, DisconnectHandoffLetsLoopRestartDelivery) {
++  observer::CallbackEvents events;
++  observer::DeliverySchedule schedule(1000, 10);
++  schedule.attempted(10);
++  schedule.fragmentSent(true);
++  ASSERT_TRUE(events.postDisconnect(62));
++
++  uint16_t disconnected_handle = 0;
++  ASSERT_TRUE(events.takeDisconnect(disconnected_handle));
++  schedule.disconnected();
++  EXPECT_EQ(disconnected_handle, 62);
++  EXPECT_TRUE(schedule.maySend(11));
++  EXPECT_FALSE(schedule.restartWholeRecord());
++}
++
++TEST(ObserverTransportCallbacks, DisableWaitsForPendingConnectBeforeQueueRelease) {
++  observer::CallbackEvents events;
++  ASSERT_TRUE(events.postConnect(63));
++  EXPECT_FALSE(events.safeToReleaseQueue(false, 0xFFFF));
++
++  uint16_t handle = 0;
++  ASSERT_TRUE(events.takeConnect(handle));
++  EXPECT_EQ(handle, 63);
++  EXPECT_TRUE(events.safeToReleaseQueue(false, 0xFFFF));
++}
++
++TEST(ObserverTransportCallbacks, DisconnectQueuedBeforePendingConnectRequiresLiveLinkCheck) {
++  observer::CallbackEvents events;
++  observer::ConnectionAdmission admission(5000);
++  ASSERT_TRUE(events.postConnect(74));
++  ASSERT_TRUE(events.postDisconnect(74));
++
++  uint16_t handle = 0xFFFF;
++  ASSERT_TRUE(events.takeDisconnect(handle));
++  EXPECT_EQ(handle, 74);
++  ASSERT_TRUE(events.takeConnect(handle));
++  EXPECT_EQ(handle, 74);
++  // Simulate service() checking Bluefruit.Connection(handle)->connected() on the
++  // connect path after consuming the out-of-order events.
++  const bool accepted = observer::admitsCandidate(
++      true, true, observer::hasLiveConnection(true, false), false, true, true, false, {}, {});
++  EXPECT_FALSE(accepted);
++  if (accepted) admission.connected(handle, 101);
++  EXPECT_FALSE(admission.pending());
++}
++
++TEST(ObserverConnectionAdmission, PublicStaticAndResolvedAddressIdentityIsKnownBeforeBonding) {
++  const observer::PeerIdentity pinned{0, {1, 2, 3, 4, 5, 6}};
++  const observer::PeerIdentity foreign{0, {6, 5, 4, 3, 2, 1}};
++  EXPECT_TRUE(observer::identityKnownAtConnect(false, 0, 0));
++  EXPECT_TRUE(observer::identityKnownAtConnect(false, 1, 0));
++  EXPECT_TRUE(observer::identityKnownAtConnect(false, 2, 1));
++  EXPECT_FALSE(observer::identityKnownAtConnect(false, 2, 0));
++  EXPECT_FALSE(observer::identityKnownAtConnect(false, 3, 0));
++  EXPECT_FALSE(observer::admitsCandidate(true, true, true, false, true, true,
++      observer::identityKnownAtConnect(false, 0, 0), foreign, pinned));
++}
++
++TEST(ObserverConnectionAdmission, PublicStaticForeignIdentityIsRejectedBeforeTakingSlot) {
++  const observer::PeerIdentity pinned{0, {1, 2, 3, 4, 5, 6}};
++  const observer::PeerIdentity foreign{0, {6, 5, 4, 3, 2, 1}};
++  ASSERT_TRUE(observer::identityKnownAtConnect(false, 0, 0));
++  EXPECT_FALSE(observer::admitsCandidate(true, true, true, false, true, true, true, foreign, pinned));
++}
++
++TEST(ObserverConnectionAdmission, NoPinnedPeerAndNotEnrollingRejectsCandidate) {
++  EXPECT_FALSE(observer::admitsCandidate(true, true, true, false, true, false, false, {}, {}));
++}
++
++TEST(ObserverConnectionAdmission, UnresolvedCandidateDisconnectHandoffReleasesSlotWithinBound) {
++  // An unresolved link holds the physical slot until its timeout-triggered
++  // disconnect event is consumed; the pinned peer then takes the slot.
++  const uint32_t timeout_ms = 5000;
++  const observer::PeerIdentity pinned{1, {1, 2, 3, 4, 5, 6}};
++  const observer::PeerIdentity foreign{1, {6, 5, 4, 3, 2, 1}};
++  observer::Policy policy(true, pinned, true);
++  observer::ConnectionAdmission admission(timeout_ms);
++  observer::CallbackEvents events;
++  uint16_t active_handle = 0xFFFF;
++
++  ASSERT_TRUE(observer::admitsCandidate(true, true, true, false, true, true, false, {}, pinned));
++  ASSERT_TRUE(admission.connected(100, 0));
++  active_handle = 100;
++  EXPECT_FALSE(observer::admitsCandidate(true, !admission.pending(), true, false, true, true, false, {}, pinned));
++  EXPECT_FALSE(admission.authorize(100, foreign, pinned));
++  EXPECT_FALSE(admission.authorized());
++  EXPECT_FALSE(policy.authorizes(false, foreign, 0));
++  EXPECT_FALSE(policy.authorizes(true, foreign, 0));
++  EXPECT_FALSE(policy.authorizes(false, pinned, 0));
++
++  uint16_t released = 0;
++  EXPECT_FALSE(admission.takeDisconnect(timeout_ms - 1, released));
++  ASSERT_TRUE(admission.takeDisconnect(timeout_ms, released));
++  EXPECT_EQ(released, 100);
++  EXPECT_FALSE(observer::admitsCandidate(true, active_handle == 0xFFFF, true, false, true, true, true, pinned, pinned));
++
++  // The timeout initiates disconnect; only its callback frees the active handle.
++  ASSERT_TRUE(events.postDisconnect(released));
++  uint16_t disconnected = 0xFFFF;
++  ASSERT_TRUE(events.takeDisconnect(disconnected));
++  EXPECT_EQ(disconnected, 100);
++  if (active_handle == disconnected) active_handle = 0xFFFF;
++  admission.disconnected(disconnected);
++  EXPECT_EQ(active_handle, 0xFFFF);
++
++  ASSERT_TRUE(observer::admitsCandidate(true, active_handle == 0xFFFF, true, false, true, true, true, pinned, pinned));
++  ASSERT_TRUE(admission.connected(101, timeout_ms));
++  active_handle = 101;
++  EXPECT_TRUE(admission.authorize(101, pinned, pinned));
++  EXPECT_TRUE(admission.authorized());
++  EXPECT_FALSE(admission.pending());
++  EXPECT_EQ(active_handle, 101);
++}
++
++TEST(ObserverStatsSnapshot, GattReadChangesOnlyAfterLoopPublishesCounters) {
++  observer::StatsSnapshot snapshot;
++  observer::RecordQueue<16, 4> queue(true, 9);
++  const uint8_t line[] = "123456789\n";
++  ASSERT_TRUE(queue.enqueue(line, sizeof(line) - 1));
++  ASSERT_TRUE(queue.enqueue(line, sizeof(line) - 1));
++
++  const observer::StatsValues before = snapshot.read();  // GATT callback read
++  EXPECT_EQ(before.evicted_records, 0U);
++  const uint32_t loop_evicted = queue.evictedRecords(); // main-loop-owned access
++  snapshot.publish(loop_evicted, queue.evictedBytes(), queue.truncatedRecords(),
++                   queue.truncatedBytes(), 0);
++  const observer::StatsValues after = snapshot.read();
++  EXPECT_EQ(after.evicted_records, loop_evicted);
++  EXPECT_GT(after.evicted_records, before.evicted_records);
++}
++
++TEST(ObserverStatsSnapshot, SnapshotsDoNotTrackLiveQueueUntilPublish) {
++  observer::StatsSnapshot snapshot;
++  observer::RecordQueue<32, 4> queue(true, 9);
++  const uint8_t line[] = "123456789\n";
++  ASSERT_TRUE(queue.enqueue(line, sizeof(line) - 1));  // 10 bytes
++  ASSERT_TRUE(queue.enqueue(line, sizeof(line) - 1));  // 20 bytes
++  ASSERT_TRUE(queue.enqueue(line, sizeof(line) - 1));  // 30 bytes, still fits
++  ASSERT_EQ(queue.evictedRecords(), 0U);
++
++  const observer::StatsValues before = snapshot.read();
++  EXPECT_EQ(before.evicted_records, 0U);
++
++  // Mutate queue further without publishing; callback still sees snapshot values.
++  ASSERT_TRUE(queue.enqueue(line, sizeof(line) - 1));  // overflows 32-byte capacity
++  EXPECT_EQ(queue.evictedRecords(), 1U);
++  const observer::StatsValues after_mutation = snapshot.read();
++  EXPECT_EQ(after_mutation.evicted_records, before.evicted_records);
++
++  const uint32_t evicted = queue.evictedRecords();
++  const uint32_t evicted_bytes = queue.evictedBytes();
++  const uint32_t truncated = queue.truncatedRecords();
++  const uint32_t truncated_bytes = queue.truncatedBytes();
++  snapshot.publish(evicted, evicted_bytes, truncated, truncated_bytes, 2);
++  const observer::StatsValues published = snapshot.read();
++  EXPECT_EQ(published.evicted_records, evicted);
++  EXPECT_EQ(published.evicted_bytes, evicted_bytes);
++  EXPECT_EQ(published.truncated_records, truncated);
++  EXPECT_EQ(published.truncated_bytes, truncated_bytes);
++  EXPECT_EQ(published.failed_notifications, 2U);
++}
++
++TEST(ObserverStatsSnapshot, GattReadReturnsOnlyPublishedValuesWithoutQueueAccess) {
++  observer::StatsSnapshot snapshot;
++  const observer::StatsValues initial = snapshot.read();
++  EXPECT_EQ(initial.evicted_records, 0U);
++  EXPECT_EQ(initial.evicted_bytes, 0U);
++  EXPECT_EQ(initial.truncated_records, 0U);
++  EXPECT_EQ(initial.truncated_bytes, 0U);
++  EXPECT_EQ(initial.failed_notifications, 0U);
++
++  snapshot.publish(3, 120, 4, 500, 2);
++  const observer::StatsValues callback_read = snapshot.read();
++  EXPECT_EQ(callback_read.evicted_records, 3U);
++  EXPECT_EQ(callback_read.evicted_bytes, 120U);
++  EXPECT_EQ(callback_read.truncated_records, 4U);
++  EXPECT_EQ(callback_read.truncated_bytes, 500U);
++  EXPECT_EQ(callback_read.failed_notifications, 2U);
++}
++
++TEST(ObserverStatsSnapshot, GattReadFormatsAllPublishedCounters) {
++  observer::StatsSnapshot snapshot;
++  snapshot.publish(3, 120, 4, 500, 2);
++  const observer::StatsValues values = snapshot.read();
++  char buffer[96]{};
++  const size_t length = observer::formatStats(values, buffer, sizeof(buffer));
++  ASSERT_GT(length, 0U);
++  EXPECT_EQ(std::string(buffer, length), "evicted=3/120 truncated=4/500 failed=2 unavailable=0/0");
++}
++
++TEST(ObserverStatsSnapshot, AdmissionLossIsSeparateAndMaximumCountersFitGattValue) {
++  observer::StatsSnapshot snapshot;
++  snapshot.publish(UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX,
++                   UINT32_MAX, UINT32_MAX);
++  const observer::StatsValues values = snapshot.read();
++  EXPECT_EQ(values.unavailable_records, UINT32_MAX);
++  EXPECT_EQ(values.unavailable_bytes, UINT32_MAX);
++  char buffer[128]{};
++  const size_t length = observer::formatStats(values, buffer, sizeof(buffer));
++  EXPECT_LT(length, sizeof(buffer));
++  EXPECT_EQ(std::string(buffer).size(), length);
++  EXPECT_NE(std::string(buffer).find("unavailable=4294967295/4294967295"), std::string::npos);
++}
++
++TEST(ObserverRecordQueue, ExhaustionSurvivesDisableAndCannotUseZeroOrSameNonce) {
++  observer::QueueSequenceState state;
++  state.advance(UINT32_MAX);
++  observer::RecordQueue<32, 4> recreated(true, 9, state);
++  const uint8_t line[] = "x\n";
++  EXPECT_FALSE(recreated.enqueue(line, sizeof(line) - 1));
++  EXPECT_FALSE(recreated.setBootNonce(0));
++  EXPECT_FALSE(recreated.setBootNonce(9));
++  ASSERT_TRUE(recreated.setBootNonce(10));
++  ASSERT_TRUE(recreated.enqueue(line, sizeof(line) - 1));
++  EXPECT_FALSE(recreated.setBootNonce(11)); // not exhausted: no arbitrary relabel
++  EXPECT_EQ(state.next(), 2U);
++  EXPECT_EQ(recreated.bootNonce(), 10U);
++}
++
++TEST(ObserverDelivery, FailedNotifyAndDisconnectRetryWholeHeadUntilPiAck) {
++  observer::RecordQueue<32, 4> queue(true, 42);
++  const uint8_t record[] = "RAW: AABB\r\n";
++  ASSERT_TRUE(queue.enqueue(record, sizeof(record) - 1));
++  observer::RecordFragment initial{};
++  ASSERT_TRUE(queue.peek(initial, 4));
++  queue.restartHead(); // failed notify or disconnected link
++  observer::RecordFragment retry{};
++  ASSERT_TRUE(queue.peek(retry, 4));
++  EXPECT_EQ(retry.sequence, initial.sequence);
++  EXPECT_EQ(retry.offset, 0U);
++  ASSERT_TRUE(queue.acknowledge(42, retry.sequence));
++  EXPECT_TRUE(queue.empty());
++}
++
++TEST(ObserverDelivery, RetryCadenceResendsWholeRecordAndResetsOnAckOrDisconnect) {
++  observer::DeliverySchedule delivery(1000);
++  EXPECT_TRUE(delivery.maySend(10));
++  delivery.attempted(10);
++  delivery.fragmentSent(false);
++  EXPECT_FALSE(delivery.maySend(19));
++  EXPECT_TRUE(delivery.maySend(20));
++  delivery.attempted(20);
++  delivery.fragmentSent(true);
++  EXPECT_FALSE(delivery.maySend(1019));
++  EXPECT_TRUE(delivery.maySend(1020));
++  EXPECT_TRUE(delivery.restartWholeRecord());
++  delivery.attempted(1020);
++  delivery.fragmentFailed();
++  EXPECT_FALSE(delivery.maySend(1029));
++  EXPECT_TRUE(delivery.maySend(1030));
++  delivery.disconnected();
++  EXPECT_TRUE(delivery.maySend(1030));
++  delivery.attempted(1030);
++  delivery.fragmentSent(true);
++  delivery.acknowledged();
++  EXPECT_FALSE(delivery.restartWholeRecord());
++  EXPECT_TRUE(delivery.maySend(1031));
++}
++
++TEST(ObserverPolicy, PreferenceAndEnrollmentFailClosedAndPinOneBondIdentity) {
++  observer::Policy policy;
++  EXPECT_FALSE(policy.enabled());
++  EXPECT_FALSE(policy.enrollmentOpen(0));
++  EXPECT_FALSE(policy.authorizes(0, {1, 2, 3, 4, 5, 6}));
++
++  policy.setEnabled(true);
++  EXPECT_TRUE(policy.enabled());
++  policy.openEnrollment(1000, 30000);
++  EXPECT_TRUE(policy.enrollmentOpen(1001));
++  const observer::PeerIdentity intended{1, {1, 2, 3, 4, 5, 6}};
++  EXPECT_TRUE(policy.enroll(intended, 1001));
++  EXPECT_TRUE(policy.authorizes(true, intended, 1002));
++  EXPECT_FALSE(policy.authorizes(true, {1, {6, 5, 4, 3, 2, 1}}, 1002));
++  EXPECT_FALSE(policy.enrollmentOpen(31000));
++  policy.revoke();
++  policy.openEnrollment(UINT32_MAX - 1000, 30000);
++  EXPECT_TRUE(policy.enrollmentOpen(500));
++  EXPECT_FALSE(policy.enrollmentOpen(30000));
++  EXPECT_FALSE(policy.enroll({1, {6, 5, 4, 3, 2, 1}}, 31000));
++
++  observer::Policy after_reboot(true, intended, true);
++  EXPECT_TRUE(after_reboot.enabled());
++  EXPECT_TRUE(after_reboot.authorizes(true, intended));
++  after_reboot.revoke();
++  EXPECT_FALSE(after_reboot.authorizes(true, intended));
++  after_reboot.openEnrollment(40000, 30000);
++  const observer::PeerIdentity replacement{0, {6, 5, 4, 3, 2, 1}};
++  EXPECT_TRUE(after_reboot.enroll(replacement, 40001));
++  EXPECT_TRUE(after_reboot.authorizes(true, replacement, 40002));
++}
++
++TEST(ObserverDelivery, RepeatedAckIngressDoesNotReplaceHostCommandSlot) {
++  observer::CommandIngress commands;
++  observer::AckIngress acknowledgements;
++  EXPECT_TRUE(commands.submitCommand("get name", strlen("get name")));
++  const char* first_ack = "ack 000000000000002a 1";
++  const char* second_ack = "ack 000000000000002a 2";
++  EXPECT_TRUE(acknowledgements.submit(first_ack, strlen(first_ack)));
++  EXPECT_FALSE(acknowledgements.submit(second_ack, strlen(second_ack)));
++  char command[96]{};
++  ASSERT_TRUE(commands.takeCommand(command, sizeof(command)));
++  EXPECT_STREQ(command, "get name");
++  char handled_ack[96]{};
++  size_t handled_length = 0;
++  ASSERT_TRUE(acknowledgements.take(handled_ack, sizeof(handled_ack), handled_length));
++  EXPECT_EQ(std::string(handled_ack, handled_length), first_ack);
++  EXPECT_TRUE(acknowledgements.submit(second_ack, strlen(second_ack)));
++  ASSERT_TRUE(acknowledgements.take(handled_ack, sizeof(handled_ack), handled_length));
++  EXPECT_EQ(std::string(handled_ack, handled_length), second_ack);
++}
++
++TEST(ObserverDelivery, HostCommandIngressRejectsEmbeddedNulInsteadOfTruncatingCommand) {
++  observer::CommandIngress commands;
++  const char smuggled[] = {'g', 'e', 't', ' ', 'n', 'a', 'm', 'e', '\0', 'x'};
++  EXPECT_FALSE(commands.submitCommand(smuggled, sizeof(smuggled)));
++  char output[96]{};
++  EXPECT_FALSE(commands.takeCommand(output, sizeof(output)));
++}
++
++TEST(ObserverProtocol, RawEvictionCreatesSequenceGapWithoutMutatingRemainingLines) {
++  observer::RecordQueue<48, 4> queue(true, 77);
++  const uint8_t raw[] = "RAW: AABB\r\n";
++  const uint8_t rx[] = "RX: CCDD\r\n";
++  const uint8_t tx[] = "TX: EEFF\r\n";
++  ASSERT_TRUE(queue.enqueue(raw, sizeof(raw) - 1));
++  ASSERT_TRUE(queue.enqueue(rx, sizeof(rx) - 1));
++  ASSERT_TRUE(queue.enqueue(tx, sizeof(tx) - 1));
++  observer::RecordFragment first{};
++  ASSERT_TRUE(queue.peek(first, 4));
++  queue.dropHeadRecord();
++  observer::RecordFragment next{};
++  ASSERT_TRUE(queue.peek(next, 32));
++  EXPECT_EQ(next.sequence, first.sequence + 1);
++  EXPECT_EQ(std::vector<uint8_t>(next.bytes, next.bytes + next.length),
++            (std::vector<uint8_t>(rx, rx + sizeof(rx) - 1)));
++  EXPECT_EQ(queue.droppedRecords(), 1U);
++  EXPECT_EQ(queue.droppedBytes(), sizeof(raw) - 1);
++}
++
++class MemoryPreferenceStore : public observer::PreferenceStore {
++ public:
++  bool read(const char* key, uint8_t* output, size_t length) override {
++    for (const auto& entry : values) {
++      if (entry.key == key && entry.length == length) {
++        memcpy(output, entry.value, length);
++        return true;
++      }
++    }
++    return false;
++  }
++  bool write(const char* key, const uint8_t* value, size_t length) override {
++    remove(key);
++    Entry entry{key, {}, length};
++    memcpy(entry.value, value, length);
++    values.push_back(entry);
++    return true;
++  }
++  bool remove(const char* key) override {
++    values.erase(std::remove_if(values.begin(), values.end(), [&](const Entry& entry) {
++      return entry.key == key;
++    }), values.end());
++    return true;
++  }
++ private:
++  struct Entry { std::string key; uint8_t value[7]{}; size_t length; };
++  std::vector<Entry> values;
++};
++
++TEST(ObserverPreferences, MissingAndOldDataDefaultOffAndOptInSurvivesReload) {
++  MemoryPreferenceStore store;
++  observer::Preferences preferences(store);
++  bool enabled = true;
++  bool has_peer = true;
++  observer::PeerIdentity peer{};
++  ASSERT_TRUE(preferences.load(enabled, peer, has_peer));
++  EXPECT_FALSE(enabled);
++  EXPECT_FALSE(has_peer);
++  observer::RecordQueue<16, 2> disabled_queue(false);
++  const uint8_t record[] = "RAW\r\n";
++  ASSERT_TRUE(disabled_queue.enqueue(record, sizeof(record) - 1));
++  EXPECT_TRUE(disabled_queue.empty());
++
++  const uint8_t old_version = 99;
++  ASSERT_TRUE(store.write("observer_v", &old_version, 1));
++  EXPECT_FALSE(preferences.load(enabled, peer, has_peer));
++  EXPECT_FALSE(enabled);
++
++  ASSERT_TRUE(preferences.saveEnabled(true));
++  observer::Preferences after_reboot(store);
++  ASSERT_TRUE(after_reboot.load(enabled, peer, has_peer));
++  EXPECT_TRUE(enabled);
++  EXPECT_FALSE(has_peer);
++}
++
++TEST(ObserverPreferences, PersistedPeerIdentityCanBeRevokedAndReplaced) {
++  MemoryPreferenceStore store;
++  observer::Preferences preferences(store);
++  const observer::PeerIdentity intended{1, {1, 2, 3, 4, 5, 6}};
++  ASSERT_TRUE(preferences.savePeer(true, intended));
++  observer::PeerIdentity restored{};
++  bool enabled = false;
++  bool has_peer = false;
++  ASSERT_TRUE(preferences.load(enabled, restored, has_peer));
++  EXPECT_TRUE(has_peer);
++  EXPECT_TRUE(observer::samePeer(intended, restored));
++  ASSERT_TRUE(preferences.savePeer(false, {}));
++  ASSERT_TRUE(preferences.savePeer(true, {0, {6, 5, 4, 3, 2, 1}}));
++  ASSERT_TRUE(preferences.load(enabled, restored, has_peer));
++  EXPECT_EQ(restored.type, 0);
++  EXPECT_EQ(restored.address[0], 6);
++}
++
++class ObserverPrefsStream : public Stream {
++ public:
++  explicit ObserverPrefsStream(std::string input = {}) : input_(std::move(input)) {}
++
++  int available() override { return static_cast<int>(input_.size() - position_); }
++  int read() override { return position_ < input_.size() ? input_[position_++] : -1; }
++  int peek() override { return position_ < input_.size() ? input_[position_] : -1; }
++  size_t write(uint8_t byte) override {
++    if (fail_closing_brace_ && byte == '}') return 0;
++    output_.push_back(static_cast<char>(byte));
++    return 1;
++  }
++  size_t print(unsigned char value, int = DEC) override { return printNumber(value); }
++  size_t print(int value, int = DEC) override { return printNumber(value); }
++  size_t print(unsigned int value, int = DEC) override { return printNumber(value); }
++  size_t print(long value, int = DEC) override { return printNumber(value); }
++  size_t print(unsigned long value, int = DEC) override { return printNumber(value); }
++  size_t print(long long value, int = DEC) override { return printNumber(value); }
++  size_t print(unsigned long long value, int = DEC) override { return printNumber(value); }
++  size_t print(double value, int precision = 2) override {
++    char text[48];
++    snprintf(text, sizeof(text), "%.*f", precision, value);
++    return Print::print(text);
++  }
++
++  void failOnClosingBrace() { fail_closing_brace_ = true; }
++  const std::string& output() const { return output_; }
++
++ private:
++  template <typename T>
++  size_t printNumber(T value) {
++    char text[48];
++    snprintf(text, sizeof(text), "%lld", static_cast<long long>(value));
++    return Print::print(text);
++  }
++
++  std::string input_;
++  std::string output_;
++  size_t position_ = 0;
++  bool fail_closing_brace_ = false;
++};
++
++TEST(ObserverNodePrefs, MissingUnknownVersionAndEmptyCustomStayDisabled) {
++  observer::ObserverNodePrefs missing;
++  ObserverPrefsStream empty_custom("{custom:{}}");
++  ASSERT_TRUE(missing.loadSerial(empty_custom));
++  EXPECT_EQ(missing.observer_version_, 0);
++  EXPECT_EQ(missing.observer_enabled, 0);
++  EXPECT_EQ(missing.observer_peer_present, 0);
++  EXPECT_FALSE(missing.observer_version_ == observer::ObserverNodePrefs::kObserverVersion &&
++               missing.observer_enabled == 1);
++
++  observer::ObserverNodePrefs unknown;
++  ObserverPrefsStream unknown_version(
++      "{observer_v:99,observer_en:1,observer_peer_on:1,custom:{}}");
++  ASSERT_TRUE(unknown.loadSerial(unknown_version));
++  EXPECT_FALSE(unknown.observer_version_ == observer::ObserverNodePrefs::kObserverVersion &&
++               unknown.observer_enabled == 1);
++}
++
++TEST(ObserverNodePrefs, ObserverAndUpstreamDynamicPrefsRoundTripThroughNodePrefs) {
++  observer::ObserverNodePrefs saved;
++  NodePrefs* common_prefs = &saved;
++  saved.observer_version_ = observer::ObserverNodePrefs::kObserverVersion;
++  saved.observer_enabled = 1;
++  saved.observer_peer_present = 1;
++  saved.observer_peer_type = 1;
++  const uint8_t address[] = {1, 2, 3, 4, 5, 6};
++  memcpy(saved.observer_peer_address, address, sizeof(address));
++  common_prefs->getRadioPrefs()->setFreq(868.3f);
++  common_prefs->getRadioPrefs()->setBandwidth(125.0f);
++  ASSERT_TRUE(common_prefs->getCustom()->setByKey("site7", "active"));
++  ASSERT_TRUE(common_prefs->isDirty());
++
++  ObserverPrefsStream serialized;
++  ASSERT_TRUE(common_prefs->saveSerial(serialized));
++  common_prefs->clearDirty();
++  EXPECT_FALSE(common_prefs->isDirty());
++
++  observer::ObserverNodePrefs reloaded;
++  NodePrefs* reloaded_common = &reloaded;
++  ObserverPrefsStream input(serialized.output());
++  ASSERT_TRUE(reloaded_common->loadSerial(input));
++  EXPECT_EQ(reloaded.observer_version_, observer::ObserverNodePrefs::kObserverVersion);
++  EXPECT_EQ(reloaded.observer_enabled, 1);
++  EXPECT_EQ(reloaded.observer_peer_present, 1);
++  EXPECT_EQ(reloaded.observer_peer_type, 1);
++  EXPECT_EQ(0, memcmp(reloaded.observer_peer_address, address, sizeof(address)));
++  EXPECT_FLOAT_EQ(868.3f, reloaded_common->getRadioPrefs()->getFreq());
++  EXPECT_FLOAT_EQ(125.0f, reloaded_common->getRadioPrefs()->getBandwidth());
++  char custom_value[32]{};
++  ASSERT_TRUE(reloaded_common->getCustom()->getByKey("site7", custom_value, sizeof(custom_value) - 1));
++  EXPECT_STREQ("active", custom_value);
++}
++
++TEST(ObserverNodePrefs, FailedNodePrefsSaveRollsBackObserverState) {
++  observer::ObserverNodePrefs prefs;
++  NodePrefs* common_prefs = &prefs;
++  common_prefs->getRadioPrefs()->setFreq(915.0f);
++  ASSERT_TRUE(common_prefs->getCustom()->setByKey("board7", "indoor"));
++  ASSERT_TRUE(common_prefs->isDirty());
++  prefs.observer_version_ = 0;
++  prefs.observer_enabled = 0;
++  prefs.observer_peer_present = 1;
++  prefs.observer_peer_type = 2;
++  const uint8_t address[] = {6, 5, 4, 3, 2, 1};
++  memcpy(prefs.observer_peer_address, address, sizeof(address));
++  const observer::PeerIdentity requested{1, {1, 2, 3, 4, 5, 6}};
++
++  const bool saved = prefs.persistPeer(true, requested, [&] {
++    ObserverPrefsStream failed;
++    failed.failOnClosingBrace();
++    return common_prefs->saveSerial(failed);
++  });
++
++  EXPECT_FALSE(saved);
++  EXPECT_EQ(prefs.observer_version_, 0);
++  EXPECT_EQ(prefs.observer_enabled, 0);
++  EXPECT_EQ(prefs.observer_peer_present, 1);
++  EXPECT_EQ(prefs.observer_peer_type, 2);
++  EXPECT_EQ(0, memcmp(prefs.observer_peer_address, address, sizeof(address)));
++  EXPECT_TRUE(common_prefs->isDirty());
++  EXPECT_FLOAT_EQ(915.0f, common_prefs->getRadioPrefs()->getFreq());
++  char custom_value[32]{};
++  ASSERT_TRUE(common_prefs->getCustom()->getByKey("board7", custom_value, sizeof(custom_value) - 1));
++  EXPECT_STREQ("indoor", custom_value);
++}
++
++TEST(ObserverNodePrefs, VersionIsStampedBeforeBasePointerSaveAndEnableRollsBackOnFailure) {
++  observer::ObserverNodePrefs prefs;
++  NodePrefs* common_prefs = &prefs;
++  ObserverPrefsStream saved;
++
++  ASSERT_TRUE(prefs.persistEnabled(true, [&] { return common_prefs->saveSerial(saved); }));
++  observer::ObserverNodePrefs reloaded;
++  ObserverPrefsStream input(saved.output());
++  ASSERT_TRUE(static_cast<NodePrefs*>(&reloaded)->loadSerial(input));
++  EXPECT_EQ(reloaded.observer_version_, observer::ObserverNodePrefs::kObserverVersion);
++  EXPECT_EQ(reloaded.observer_enabled, 1);
++
++  const bool failed = prefs.persistEnabled(false, [&] {
++    ObserverPrefsStream failed_stream;
++    failed_stream.failOnClosingBrace();
++    return common_prefs->saveSerial(failed_stream);
++  });
++  EXPECT_FALSE(failed);
++  EXPECT_EQ(prefs.observer_version_, observer::ObserverNodePrefs::kObserverVersion);
++  EXPECT_EQ(prefs.observer_enabled, 1);
++}
++
++TEST(ObserverNodePrefs, EnablingUnknownSchemaClearsUntrustedPeerBeforeSave) {
++  const uint8_t old_address[] = {1, 2, 3, 4, 5, 6};
++  observer::ObserverNodePrefs prefs;
++  ObserverPrefsStream legacy(
++      "{observer_v:99,observer_en:0,observer_peer_on:1,observer_peer_type:1,"
++      "observer_peer_addr:\"010203040506\",custom:{}}");
++  ASSERT_TRUE(prefs.loadSerial(legacy));
++  ASSERT_EQ(prefs.observer_version_, 99);
++  ASSERT_EQ(prefs.observer_peer_present, 1);
++  ASSERT_EQ(0, memcmp(prefs.observer_peer_address, old_address, sizeof(old_address)));
++
++  NodePrefs* common_prefs = &prefs;
++  ObserverPrefsStream saved;
++  ASSERT_TRUE(prefs.persistEnabled(true, [&] { return common_prefs->saveSerial(saved); }));
++
++  observer::ObserverNodePrefs reloaded;
++  ObserverPrefsStream input(saved.output());
++  ASSERT_TRUE(static_cast<NodePrefs*>(&reloaded)->loadSerial(input));
++  EXPECT_EQ(reloaded.observer_version_, observer::ObserverNodePrefs::kObserverVersion);
++  EXPECT_EQ(reloaded.observer_enabled, 1);
++  EXPECT_EQ(reloaded.observer_peer_present, 0);
++  EXPECT_EQ(reloaded.observer_peer_type, 0);
++  const uint8_t cleared_address[sizeof(old_address)]{};
++  EXPECT_EQ(0, memcmp(reloaded.observer_peer_address, cleared_address, sizeof(cleared_address)));
++}
++
++TEST(ObserverNodePrefs, FailedEnableFromUnknownSchemaRestoresPeerAndUpstreamDirtyPrefs) {
++  observer::ObserverNodePrefs prefs;
++  ObserverPrefsStream legacy(
++      "{observer_v:99,observer_en:0,observer_peer_on:1,observer_peer_type:1,"
++      "observer_peer_addr:\"010203040506\",custom:{}}");
++  ASSERT_TRUE(prefs.loadSerial(legacy));
++  NodePrefs* common_prefs = &prefs;
++  common_prefs->getRadioPrefs()->setFreq(915.0f);
++  ASSERT_TRUE(common_prefs->getCustom()->setByKey("board7", "outdoor"));
++
++  ObserverPrefsStream failed_stream;
++  failed_stream.failOnClosingBrace();
++  EXPECT_FALSE(prefs.persistEnabled(true, [&] { return common_prefs->saveSerial(failed_stream); }));
++
++  EXPECT_EQ(prefs.observer_version_, 99);
++  EXPECT_EQ(prefs.observer_enabled, 0);
++  EXPECT_EQ(prefs.observer_peer_present, 1);
++  EXPECT_EQ(prefs.observer_peer_type, 1);
++  const uint8_t legacy_address[] = {1, 2, 3, 4, 5, 6};
++  EXPECT_EQ(0, memcmp(prefs.observer_peer_address, legacy_address, sizeof(legacy_address)));
++  EXPECT_TRUE(common_prefs->isDirty());
++  EXPECT_FLOAT_EQ(915.0f, common_prefs->getRadioPrefs()->getFreq());
++  char custom_value[32]{};
++  ASSERT_TRUE(common_prefs->getCustom()->getByKey("board7", custom_value, sizeof(custom_value) - 1));
++  EXPECT_STREQ("outdoor", custom_value);
++}
++
++TEST(ObserverNodePrefs, SuccessfulPeerPersistenceRoundTripsCurrentSchema) {
++  observer::ObserverNodePrefs prefs;
++  NodePrefs* common_prefs = &prefs;
++  const observer::PeerIdentity intended{1, {6, 5, 4, 3, 2, 1}};
++  ObserverPrefsStream saved;
++
++  ASSERT_TRUE(prefs.persistPeer(true, intended, [&] { return common_prefs->saveSerial(saved); }));
++  observer::ObserverNodePrefs reloaded;
++  ObserverPrefsStream input(saved.output());
++  ASSERT_TRUE(static_cast<NodePrefs*>(&reloaded)->loadSerial(input));
++  EXPECT_EQ(reloaded.observer_version_, observer::ObserverNodePrefs::kObserverVersion);
++  EXPECT_EQ(reloaded.observer_peer_present, 1);
++  EXPECT_EQ(reloaded.observer_peer_type, intended.type);
++  EXPECT_EQ(0, memcmp(reloaded.observer_peer_address, intended.address, sizeof(intended.address)));
++}
++
++TEST(ObserverCommand, ReadAllowlistHasExactNamesAndRejectsMutations) {
++  const char* allowed[] = {
++      "get name", "get public.key", "get prv.key", "get radio", "ver", "board",
++      "stats-core", "stats-radio", "stats-packets"};
++  for (const char* command : allowed) EXPECT_TRUE(observer::isAllowedReadCommand(command)) << command;
++
++  const char* rejected[] = {
++      "get radio extra", "set radio 915 125 7 5", "set tx 20", "erase config",
++      "start ota", "observer enable", "get name ", "stats-packets extra"};
++  for (const char* command : rejected) EXPECT_FALSE(observer::isAllowedReadCommand(command)) << command;
++}
++
++TEST(ObserverPolicy, EnrollmentIsRejectedByDefaultAndSecondPeerCannotReplacePinnedPeer) {
++  observer::Policy policy(false);
++  const observer::PeerIdentity intended{1, {1, 2, 3, 4, 5, 6}};
++  policy.openEnrollment(100, 1000);
++  EXPECT_FALSE(policy.enroll(intended, 101));
++
++  policy.setEnabled(true);
++  policy.openEnrollment(200, 1000);
++  ASSERT_TRUE(policy.enroll(intended, 201));
++  policy.openEnrollment(300, 1000);
++  EXPECT_FALSE(policy.enroll({1, {6, 5, 4, 3, 2, 1}}, 301));
++  policy.closeEnrollment();
++  EXPECT_TRUE(policy.authorizes(true, intended, 302));
++  EXPECT_FALSE(policy.authorizes(true, {1, {6, 5, 4, 3, 2, 1}}, 302));
++}
++
++}  // namespace
++
++#if defined(OBSERVER_REAL_COMMONCLI_TEST)
++#define constrain(value, lower, upper) \
++  ((value) < (lower) ? (lower) : ((value) > (upper) ? (upper) : (value)))
++#define min(left, right) ((left) < (right) ? (left) : (right))
++// The native source filter omits these constructors; provide only the default
++// storage initializers needed to instantiate the unused CLI dependencies.
++namespace mesh {
++Identity::Identity() { memset(pub_key, 0, sizeof(pub_key)); }
++}
++RegionMap::RegionMap(TransportKeyStore& store) : _store(&store) {
++  next_id = 1; num_regions = 0;
++  default_id = home_id = 0;
++  wildcard.id = wildcard.parent = 0;
++  wildcard.flags = 0;
++  strcpy(wildcard.name, "*");
++}
++#include "../../src/helpers/CommonCLI.cpp"
++#undef min
++#undef constrain
++
++class ObserverPrefsTestBoard : public mesh::MainBoard {
++ public:
++  uint16_t getBattMilliVolts() override { return 4100; }
++  const char* getManufacturerName() const override { return "test"; }
++  void reboot() override {}
++  uint8_t getStartupReason() const override { return 0; }
++};
++
++class ObserverPrefsTestRTC : public mesh::RTCClock {
++ public:
++  uint32_t getCurrentTime() override { return 0; }
++  void setCurrentTime(uint32_t) override {}
++};
++
++TEST(ObserverNodePrefs, CommonCLIMigratesLegacyBinaryPrefsWithoutEnrollingObserver) {
++  FILESYSTEM filesystem;
++  std::string legacy(295, '\0');
++  const char legacy_name[] = "legacy-node";
++  const float frequency = 868.3f;
++  const float bandwidth = 125.0f;
++  memcpy(&legacy[4], legacy_name, sizeof(legacy_name));
++  memcpy(&legacy[72], &frequency, sizeof(frequency));
++  legacy[112] = 7;
++  legacy[113] = 5;
++  memcpy(&legacy[116], &bandwidth, sizeof(bandwidth));
++  filesystem.addLegacyPrefs(legacy);
++
++  observer::ObserverNodePrefs prefs;
++  ObserverPrefsTestBoard board;
++  ObserverPrefsTestRTC rtc;
++  SensorManager sensors;
++  TransportKeyStore key_store;
++  RegionMap regions(key_store);
++  ClientACL acl;
++  CommonCLI cli(board, rtc, sensors, regions, acl, &prefs, nullptr);
++
++  cli.loadPrefs(&filesystem);
++
++  EXPECT_TRUE(filesystem.hasMigratedPrefs());
++  EXPECT_STREQ(legacy_name, prefs.node_name);
++  EXPECT_FLOAT_EQ(frequency, prefs.freq);
++  EXPECT_EQ(prefs.sf, 7);
++  EXPECT_EQ(prefs.cr, 5);
++  EXPECT_FLOAT_EQ(bandwidth, prefs.bw);
++  EXPECT_EQ(prefs.observer_version_, 0);
++  EXPECT_EQ(prefs.observer_enabled, 0);
++  EXPECT_EQ(prefs.observer_peer_present, 0);
++  EXPECT_NE(std::string::npos, filesystem.migratedPrefs().find("observer_v:0"));
++
++  observer::ObserverNodePrefs reloaded;
++  ObserverPrefsStream input(filesystem.migratedPrefs());
++  ASSERT_TRUE(reloaded.loadSerial(input));
++  EXPECT_EQ(reloaded.observer_version_, 0);
++  EXPECT_EQ(reloaded.observer_enabled, 0);
++  EXPECT_EQ(reloaded.observer_peer_present, 0);
++  EXPECT_STREQ(legacy_name, reloaded.node_name);
++  EXPECT_FLOAT_EQ(frequency, reloaded.freq);
++  EXPECT_FLOAT_EQ(bandwidth, reloaded.bw);
++}
++#endif
++
++int main(int argc, char** argv) {
++  ::testing::InitGoogleTest(&argc, argv);
++  return RUN_ALL_TESTS();
++}

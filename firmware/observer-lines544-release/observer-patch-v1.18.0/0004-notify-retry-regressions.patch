@@ -1,0 +1,125 @@
+diff --git a/test/test_observer_transport/test_stream_queue.cpp b/test/test_observer_transport/test_stream_queue.cpp
+--- a/test/test_observer_transport/test_stream_queue.cpp
++++ b/test/test_observer_transport/test_stream_queue.cpp
+@@ -150,6 +150,9 @@
+ } Serial;
+ struct BLEUuid { explicit BLEUuid(const uint8_t*) {} };
+ inline int fake_gatt_status = 0, fake_gatt_calls = 0, fake_notifications = 0;
++inline bool fake_notification_ok = true;
++inline std::vector<std::vector<uint8_t>> fake_notification_attempts;
++inline std::vector<std::vector<uint8_t>> fake_accepted_notifications;
+ struct BLECharacteristic;
+ using FakeWriteCallback = void (*)(uint16_t, BLECharacteristic*, uint8_t*, uint16_t);
+ inline std::vector<FakeWriteCallback> fake_writes;
+@@ -166,7 +169,13 @@
+   void setReadAuthorizeCallback(decltype(fake_read) cb) { fake_read = cb; }
+   int begin() { ++fake_gatt_calls; return fake_gatt_status; }
+   bool notifyEnabled(uint16_t) { return true; }
+-  bool notify(uint16_t, const uint8_t*, size_t) { ++fake_notifications; return true; }
++  bool notify(uint16_t, const uint8_t* bytes, size_t length) {
++    ++fake_notifications;
++    fake_notification_attempts.emplace_back(bytes, bytes + length);
++    if (!fake_notification_ok) return false;
++    fake_accepted_notifications.emplace_back(bytes, bytes + length);
++    return true;
++  }
+ };
+ struct BLEConnection {
+   bool live = false, bond = false, secure = false;
+@@ -249,11 +258,16 @@
+   void SetUp() override {
+     Bluefruit = FakeBluefruit{}; Serial = FakeSerial{}; g_mock_millis = 0;
+     fake_gatt_calls = fake_gatt_status = fake_notifications = 0; saved_enabled = false;
++    fake_notification_ok = true;
++    fake_notification_attempts.clear(); fake_accepted_notifications.clear();
+     fake_writes.clear(); fake_read = nullptr; fake_reads = 0;
+     fake_fail_nothrow_after = -1; fake_nothrow_allocations = 0;
+     t.setPreferenceCallbacks(saveEnabled, savePeer);
+   }
+-  void TearDown() override { observer::TransportTestAccess::dispose(t); }
++  void TearDown() override {
++    fake_notification_ok = true;
++    observer::TransportTestAccess::dispose(t);
++  }
+   void ready(bool pinned = false) {
+     observer::PeerIdentity peer{};
+     t.attachPreferences(false, peer, pinned);
+@@ -350,6 +364,78 @@
+   disconnect(); EXPECT_TRUE(Bluefruit.Advertising.running);
+   EXPECT_TRUE(observer::TransportTestAccess::queued(t));
+   connect(); g_mock_millis += 1000; t.service(); EXPECT_GT(fake_notifications, 0);
++}
++TEST_F(ObserverProductionLifecycle, RejectedNotifyRetriesUnsentFragmentWithoutRewinding) {
++  ready(true); connect();
++  const uint8_t line[] = "abcdefghijk\n";
++  t.writeLog(line, sizeof(line)-1);
++  t.service(); // accepted offset zero, four payload bytes
++  ASSERT_EQ(fake_accepted_notifications.size(), 1U);
++  fake_notification_ok = false;
++  g_mock_millis += 10; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 2U);
++  EXPECT_EQ(fake_notification_attempts.back()[14], 4U);
++  fake_notification_ok = true;
++  g_mock_millis += 9; t.service();
++  EXPECT_EQ(fake_notification_attempts.size(), 2U); // pacing still applies
++  g_mock_millis += 1; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 3U);
++  EXPECT_EQ(fake_notification_attempts[1], fake_notification_attempts[2]);
++  EXPECT_EQ(t.failedNotifications(), 1U);
++  EXPECT_TRUE(observer::TransportTestAccess::queued(t)); // notify is not ACK
++  fake_notification_ok = false;
++  g_mock_millis += 10; t.service(); // reject the final fragment too
++  EXPECT_EQ(fake_notification_attempts.back()[14], 8U);
++  fake_notification_ok = true;
++  g_mock_millis += 10; t.service();
++  ASSERT_EQ(fake_accepted_notifications.size(), 3U);
++  EXPECT_EQ(fake_accepted_notifications.back()[14], 8U);
++  EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++  uint8_t ack[] = "ack 000000000000002a 1";
++  ASSERT_EQ(fake_writes.size(), 2U);
++  fake_writes[1](1, nullptr, ack, sizeof(ack)-1); t.service();
++  EXPECT_FALSE(observer::TransportTestAccess::queued(t));
++  const size_t attempts = fake_notification_attempts.size();
++  g_mock_millis += 1000; t.service();
++  EXPECT_EQ(fake_notification_attempts.size(), attempts); // no replay after ACK
++}
++TEST_F(ObserverProductionLifecycle, LongRecordCompletesWithIntermittentNotifyRejection) {
++  ready(true); connect();
++  const std::string line = std::string(129, 'x') + '\n';
++  t.writeLog(reinterpret_cast<const uint8_t*>(line.data()), line.size());
++  for (unsigned tick = 0; tick < 49; ++tick) {
++    fake_notification_ok = tick % 3 != 2;
++    t.service(); g_mock_millis += 10;
++  }
++  ASSERT_EQ(fake_accepted_notifications.size(), 33U);
++  std::string received;
++  for (const auto& frame : fake_accepted_notifications) {
++    ASSERT_GE(frame.size(), 17U);
++    EXPECT_LE(frame.size(), 20U);
++    EXPECT_EQ(frame[8], 1U); EXPECT_EQ(frame[12], 130U);
++    ASSERT_EQ(frame[14] | (frame[15] << 8), received.size());
++    received.append(reinterpret_cast<const char*>(frame.data() + 16), frame.size() - 16);
++  }
++  EXPECT_EQ(received, line);
++  EXPECT_EQ(t.failedNotifications(), 16U);
++  EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++  fake_notification_ok = true;
++  const size_t attempts = fake_notification_attempts.size();
++  g_mock_millis += 989; t.service();
++  EXPECT_EQ(fake_notification_attempts.size(), attempts);
++  g_mock_millis += 1; t.service(); // full record ACK timeout still rewinds
++  ASSERT_EQ(fake_notification_attempts.size(), attempts + 1);
++  EXPECT_EQ(fake_notification_attempts.back()[14], 0U);
++}
++TEST_F(ObserverProductionLifecycle, DisconnectAfterPartialDeliveryStillReplaysWholeRecord) {
++  ready(true); connect();
++  const uint8_t line[] = "abcdefghijk\n";
++  t.writeLog(line, sizeof(line)-1); t.service();
++  g_mock_millis += 10; t.service();
++  ASSERT_EQ(fake_accepted_notifications.back()[14], 4U);
++  disconnect(); connect();
++  ASSERT_EQ(fake_accepted_notifications.size(), 3U);
++  EXPECT_EQ(fake_accepted_notifications.back()[14], 0U);
+ }
+ TEST_F(ObserverProductionLifecycle, EnrollmentPinsThenDisconnectRestartsWithoutUnbondedData) {
+   ready(); ASSERT_TRUE(t.beginEnrollment()); connect(false);

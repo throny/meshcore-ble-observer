@@ -1,0 +1,15 @@
+__pycache__/
+.venv/
+.vscode/
+config.toml
+config.d/
+*.log
+output.log
+venv/
+.DS_Store
+.claude/settings.local.json
+uv.lock
+!uv.lock
+.codex
+.codex/
+.pytest_cache/

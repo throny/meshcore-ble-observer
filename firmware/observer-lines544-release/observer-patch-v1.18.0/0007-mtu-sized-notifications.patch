@@ -1,0 +1,224 @@
+diff --git a/src/observer/ObserverTransport.cpp b/src/observer/ObserverTransport.cpp
+--- a/src/observer/ObserverTransport.cpp
++++ b/src/observer/ObserverTransport.cpp
+@@ -3,6 +3,7 @@
+ #include <utility/bonding.h>
+ #endif
+ #include <new>
++#include <algorithm>
+ #include <stdio.h>
+ 
+ #include "ObserverPreference.h"
+@@ -18,7 +19,7 @@
+ constexpr uint8_t kAckUuid[] = {0x1b, 0x5f, 0x6f, 0x05, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
+ constexpr uint8_t kStatsUuid[] = {0x1b, 0x5f, 0x6f, 0x06, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
+ constexpr uint16_t kAdvertisingInterval = 1600;  // 1 second
+-constexpr uint16_t kNotificationBytes = 20;
++constexpr uint16_t kNotificationBytes = 244;
+ }
+ 
+ Transport* Transport::instance_ = nullptr;
+@@ -489,6 +490,11 @@
+   const uint16_t handle = connectionHandle();
+   if (!enabled_ || !nonce_ready_ || !log_queue_ || !__atomic_load_n(&secured_, __ATOMIC_ACQUIRE) || !authorizedAndSecured(handle) ||
+       !log_characteristic_.notifyEnabled(handle) || log_queue_->empty()) return;
++  BLEConnection* connection = Bluefruit.Connection(handle);
++  if (!connection) return;
++  const uint16_t mtu = connection->getMtu();
++  if (mtu < 23) return;
++  const size_t notification_bytes = std::min<size_t>(kNotificationBytes, mtu - 3);
+   const unsigned long now = millis();
+   if (!delivery_.maySend(now)) return;
+   if (__atomic_load_n(&complete_record_sent_, __ATOMIC_ACQUIRE)) {
+@@ -497,7 +503,7 @@
+     __atomic_store_n(&complete_record_sent_, false, __ATOMIC_RELEASE);
+   }
+   RecordFragment fragment;
+-  if (!log_queue_->peek(fragment, kNotificationBytes - kFrameHeaderBytes)) return;
++  if (!log_queue_->peek(fragment, notification_bytes - kFrameHeaderBytes)) return;
+   uint8_t notification[kNotificationBytes];
+   const size_t encoded = encodeFrame(fragment.boot_nonce, fragment.sequence, fragment.total_length,
+                                      fragment.offset, fragment.bytes, fragment.length,
+diff --git a/test/test_observer_transport/test_stream_queue.cpp b/test/test_observer_transport/test_stream_queue.cpp
+--- a/test/test_observer_transport/test_stream_queue.cpp
++++ b/test/test_observer_transport/test_stream_queue.cpp
+@@ -158,6 +158,8 @@
+ inline bool fake_notification_ok = true;
+ inline std::vector<std::vector<uint8_t>> fake_notification_attempts;
+ inline std::vector<std::vector<uint8_t>> fake_accepted_notifications;
++inline int fake_log_max_len = 0;
++inline std::vector<int> fake_max_lengths;
+ struct BLECharacteristic;
+ using FakeWriteCallback = void (*)(uint16_t, BLECharacteristic*, uint8_t*, uint16_t);
+ inline std::vector<FakeWriteCallback> fake_writes;
+@@ -169,7 +171,7 @@
+ };
+ struct BLECharacteristic {
+   explicit BLECharacteristic(BLEUuid) {}
+-  void setProperties(int) {} void setPermission(int, int) {} void setMaxLen(int) {}
++  void setProperties(int) {} void setPermission(int, int) {} void setMaxLen(int length) { fake_log_max_len = length; fake_max_lengths.push_back(length); }
+   void setWriteCallback(FakeWriteCallback cb) { fake_writes.push_back(cb); }
+   void setReadAuthorizeCallback(decltype(fake_read) cb) { fake_read = cb; }
+   int begin() { ++fake_gatt_calls; return fake_gatt_status; }
+@@ -185,6 +187,8 @@
+ struct BLEConnection {
+   bool live = false, bond = false, secure = false;
+   unsigned disconnects = 0;
++  uint16_t mtu = 23;
++  uint16_t getMtu() { return mtu; }
+   ble_gap_addr_t address{};
+   bool connected() { return live; } bool bonded() { return bond; } bool secured() { return secure; }
+   ble_gap_addr_t getPeerAddr() { return address; }
+@@ -279,6 +283,7 @@
+ 
+ namespace observer {
+ struct TransportTestAccess {
++  static void setHandle(Transport& t, uint16_t handle) { t.setConnectionHandle(handle); }
+   static bool allocated(Transport& t) { return t.log_queue_ || t.line_buffer_; }
+   static bool queued(Transport& t) { return t.log_queue_ && !t.log_queue_->empty(); }
+   static uint64_t nonce(Transport& t) { return t.boot_nonce_; }
+@@ -301,7 +306,7 @@
+     fake_blue_led = LED_STATE_ON;
+     fake_gatt_calls = fake_gatt_status = fake_notifications = 0; saved_enabled = false;
+     fake_notification_ok = true;
+-    fake_notification_attempts.clear(); fake_accepted_notifications.clear();
++    fake_notification_attempts.clear(); fake_accepted_notifications.clear(); fake_max_lengths.clear();
+     fake_writes.clear(); fake_read = nullptr; fake_reads = 0;
+     fake_fail_nothrow_after = -1; fake_nothrow_allocations = 0;
+     t.setPreferenceCallbacks(saveEnabled, savePeer);
+@@ -318,6 +323,7 @@
+   }
+   void connect(bool secure = true) {
+     Bluefruit.Advertising.running = false;
++    Bluefruit.connection.mtu = 23;
+     Bluefruit.connection.live = true;
+     Bluefruit.connection.bond = Bluefruit.connection.secure = secure;
+     Bluefruit.Periph.connect(1); t.service();
+@@ -336,6 +342,127 @@
+     t.service();
+   }
+ };
++TEST_F(ObserverProductionLifecycle, NotificationsUseNegotiatedMtuBudgetAndCompleteHeaders) {
++  ready(true); connect();
++  ASSERT_EQ(fake_max_lengths.front(), 244);
++  const uint16_t mtus[] = {23, 24, 64, 247, 517};
++  const size_t budgets[] = {20, 21, 61, 244, 244};
++  const std::string line(254, 'x');
++  const std::string complete_line = line + '\n';
++  uint32_t expected_sequence = 1;
++  uint16_t expected_offset = 0;
++  for (size_t i = 0; i < 5; ++i) {
++    Bluefruit.connection.mtu = mtus[i];
++    t.writeLog(reinterpret_cast<const uint8_t*>(complete_line.data()), complete_line.size());
++    const size_t before = fake_notification_attempts.size();
++    g_mock_millis += 1000;
++    t.service();
++    ASSERT_GT(fake_notification_attempts.size(), before);
++    const auto& frame = fake_notification_attempts.back();
++    EXPECT_LE(frame.size(), budgets[i]);
++    if (budgets[i] > 20) EXPECT_GT(frame.size(), 20U);
++    if (budgets[i] == 21 || budgets[i] == 61) EXPECT_EQ(frame.size(), budgets[i]);
++    ASSERT_GE(frame.size(), observer::kFrameHeaderBytes + 1);
++    // Decode the wire header independently of the production decoder/encoder.
++    uint64_t nonce = 0;
++    for (unsigned byte = 0; byte < 8; ++byte)
++      nonce |= static_cast<uint64_t>(frame[byte]) << (byte * 8);
++    uint32_t sequence = 0;
++    for (unsigned byte = 0; byte < 4; ++byte)
++      sequence |= static_cast<uint32_t>(frame[8 + byte]) << (byte * 8);
++    const uint16_t total = static_cast<uint16_t>(frame[12] | (uint16_t(frame[13]) << 8));
++    const uint16_t offset = static_cast<uint16_t>(frame[14] | (uint16_t(frame[15]) << 8));
++    const size_t payload = frame.size() - observer::kFrameHeaderBytes;
++    EXPECT_EQ(nonce, 42U);
++    EXPECT_EQ(sequence, expected_sequence);
++    EXPECT_EQ(total, complete_line.size());
++    EXPECT_EQ(offset, expected_offset);
++    EXPECT_GT(payload, 0U);
++    EXPECT_LE(payload, static_cast<size_t>(total - offset));
++    if (payload <= total - offset) {
++      expected_offset = static_cast<uint16_t>(offset + payload);
++      if (expected_offset == total) expected_offset = 0;
++    }
++    g_mock_millis += 10;
++  }
++}
++
++TEST_F(ObserverProductionLifecycle, MissingAndInvalidMtuDoNotNotifyOrConsume) {
++  ready(true); connect();
++  const uint8_t line[] = "invalid-mtu-guard\n";
++  t.writeLog(line, sizeof(line)-1);
++  observer::TransportTestAccess::setHandle(t, 2);
++  g_mock_millis += 1000; t.service();
++  EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++  EXPECT_TRUE(fake_notification_attempts.empty());
++  observer::TransportTestAccess::setHandle(t, 1);
++  for (uint16_t mtu : {uint16_t{0}, uint16_t{22}}) {
++    Bluefruit.connection.mtu = mtu;
++    g_mock_millis += 1000; t.service();
++    EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++    EXPECT_TRUE(fake_notification_attempts.empty());
++  }
++  Bluefruit.connection.mtu = 23;
++  g_mock_millis += 1000; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 1U);
++  EXPECT_EQ(fake_notification_attempts.back().size(), 20U);
++}
++
++TEST_F(ObserverProductionLifecycle, ReconnectFromLargeMtuUsesNewDefaultMtu) {
++  ready(true); connect();
++  Bluefruit.connection.mtu = 247;
++  const uint8_t first[] = "first-record\n";
++  t.writeLog(first, sizeof(first)-1); g_mock_millis += 1000; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 1U);
++  EXPECT_GT(fake_notification_attempts.back().size(), 20U);
++  disconnect(); connect();
++  const uint8_t second[] = "second-record\n";
++  t.writeLog(second, sizeof(second)-1); g_mock_millis += 1000; t.service();
++  ASSERT_GE(fake_notification_attempts.size(), 2U);
++  EXPECT_LE(fake_notification_attempts.back().size(), 20U);
++}
++
++TEST_F(ObserverProductionLifecycle, FailedLargeMtuNotifyRetriesSameUnsentFragment) {
++  ready(true); connect(); Bluefruit.connection.mtu = 247;
++  const std::string line(254, 'x'); const std::string complete = line + '\n';
++  t.writeLog(reinterpret_cast<const uint8_t*>(complete.data()), complete.size());
++  g_mock_millis += 1000; t.service();
++  ASSERT_EQ(fake_accepted_notifications.size(), 1U);
++  const auto accepted = fake_accepted_notifications.back();
++  ASSERT_EQ(accepted.size(), 244U);
++  fake_notification_ok = false; g_mock_millis += 10; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 2U);
++  const auto rejected = fake_notification_attempts.back();
++  EXPECT_NE(rejected, accepted);
++  fake_notification_ok = true; g_mock_millis += 10; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 3U);
++  EXPECT_EQ(fake_notification_attempts.back(), rejected);
++  EXPECT_EQ(fake_accepted_notifications.size(), 2U);
++  EXPECT_TRUE(observer::TransportTestAccess::queued(t));
++}
++
++TEST_F(ObserverProductionLifecycle, Mtu247SendsFull244ByteNotification) {
++  ready(true); connect(); Bluefruit.connection.mtu = 247;
++  const std::string line(254, 'x'); const std::string complete = line + '\n';
++  t.writeLog(reinterpret_cast<const uint8_t*>(complete.data()), complete.size());
++  g_mock_millis += 1000; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 1U);
++  ASSERT_EQ(fake_notification_attempts.back().size(), 244U);
++  EXPECT_EQ(fake_notification_attempts.back()[12] | (uint16_t(fake_notification_attempts.back()[13]) << 8), 255U);
++  EXPECT_EQ(fake_notification_attempts.back()[14] | (uint16_t(fake_notification_attempts.back()[15]) << 8), 0U);
++}
++
++TEST_F(ObserverProductionLifecycle, Mtu517SendsFull244ByteNotification) {
++  ready(true); connect(); Bluefruit.connection.mtu = 517;
++  const std::string line(254, 'x'); const std::string complete = line + '\n';
++  t.writeLog(reinterpret_cast<const uint8_t*>(complete.data()), complete.size());
++  g_mock_millis += 1000; t.service();
++  ASSERT_EQ(fake_notification_attempts.size(), 1U);
++  ASSERT_EQ(fake_notification_attempts.back().size(), 244U);
++  EXPECT_EQ(fake_notification_attempts.back()[12] | (uint16_t(fake_notification_attempts.back()[13]) << 8), 255U);
++  EXPECT_EQ(fake_notification_attempts.back()[14] | (uint16_t(fake_notification_attempts.back()[15]) << 8), 0U);
++}
++
+ TEST_F(ObserverProductionLifecycle, DefaultOffNeverStartsCoreOrAllocates) {
+   EXPECT_FALSE(t.begin("off", false)); t.service(); EXPECT_TRUE(t.enable(false)); t.service();
+   EXPECT_EQ(Bluefruit.begins, 0); EXPECT_EQ(Bluefruit.entropy_calls, 0);
