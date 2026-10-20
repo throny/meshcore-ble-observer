@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import stat
 import sys
@@ -133,6 +134,9 @@ def main():
     args = parser.parse_args()
     os.umask(0o077)
     try:
+        # Recovery material and its passphrase must never enter a crash dump.
+        # Fail before prompting or opening the device if this cannot be applied.
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         if not re.fullmatch(r"/dev/ttyACM[0-9]+", args.port):
             raise BackupError("Specify an explicit /dev/ttyACM device path.")
         if args.expected_public_key is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", args.expected_public_key):

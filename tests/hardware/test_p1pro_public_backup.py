@@ -62,6 +62,21 @@ def test_public_helper_is_independent_of_operator_specific_recovery_source():
     assert "/home/" not in source
 
 
+def test_main_disables_core_dumps_before_any_recovery_input(monkeypatch, tmp_path):
+    import resource
+
+    h = helper()
+    requested = []
+    monkeypatch.setattr(resource, "setrlimit", lambda kind, limits: requested.append((kind, limits)))
+    monkeypatch.setattr(sys, "argv", ["backup", "--port", "invalid", "--destination", str(tmp_path), "--include-private"])
+    old_umask = os.umask(0o077)
+    try:
+        assert h.main() == 1  # Stops at port validation, without touching a device.
+    finally:
+        os.umask(old_umask)
+    assert requested == [(resource.RLIMIT_CORE, (0, 0))]
+
+
 def test_wrong_board_fails_closed():
     h = helper()
     with pytest.raises(h.BackupError):
