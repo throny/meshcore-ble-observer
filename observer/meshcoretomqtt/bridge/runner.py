@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from time import sleep
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from config_loader import log_config_sources, resolve_transport
 
@@ -39,7 +39,7 @@ def process_device_line(state: BridgeState) -> bool:
     return True
 
 
-def connect_transport(config: dict[str, Any]):
+def connect_transport(config: dict[str, Any], *, serial_factory=None, ble_factory=None):
     """Connect the explicitly selected device transport; serial is the default."""
     try:
         transport = resolve_transport(config)
@@ -47,8 +47,8 @@ def connect_transport(config: dict[str, Any]):
         logger.error("Invalid transport configuration: %s", exc)
         return None
     if transport == 'serial':
-        return serial_connection.connect(config)
-    return ble_connection.connect(config)
+        return (serial_connection.connect if serial_factory is None else serial_factory)(config)
+    return (ble_connection.connect if ble_factory is None else ble_factory)(config)
 
 
 def load_client_version(version: str) -> str:
@@ -103,7 +103,8 @@ def wait_for_system_time_sync(state: BridgeState) -> bool:
     return True
 
 
-def run(state: BridgeState) -> None:
+def run(state: BridgeState, *, transport_factory=None,
+        startup_wait: Callable[[float], None] | None = None) -> None:
     """Main orchestration: connect serial, query device, connect MQTT, read loop."""
     stats_thread = threading.Thread(
         target=background.stats_logging_loop,
@@ -115,17 +116,20 @@ def run(state: BridgeState) -> None:
     # lifetime inside the same finally as the main loop: an early return must
     # not leave a BlueZ connection alive after this process exits.
     try:
-        _run(state, stats_thread)
+        _run(state, stats_thread,
+             connect_transport if transport_factory is None else transport_factory,
+             sleep if startup_wait is None else startup_wait)
     finally:
         _cleanup(state, stats_thread)
 
 
-def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
+def _run(state: BridgeState, stats_thread: threading.Thread, transport_factory,
+         startup_wait: Callable[[float], None]) -> None:
     """Run startup and packet processing within the caller's cleanup scope."""
     log_config_sources(state.config)
 
     # Connect selected transport (serial remains the backwards-compatible default).
-    state.device = connect_transport(state.config)
+    state.device = transport_factory(state.config)
     if not state.device:
         return
 
@@ -201,7 +205,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
             retry_count += 1
             wait_time = min(retry_count * 2, 30)
             logger.warning(f"[MQTT] Initial connection failed. Retrying in {wait_time}s... (attempt {retry_count}/{max_initial_retries})")
-            sleep(wait_time)
+            startup_wait(wait_time)
 
     if state.should_exit:
         return
@@ -237,7 +241,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
                     if not state.device.is_open:
                         logger.warning("Device transport disconnected, reconnecting")
                         state.device.close()
-                        state.device = connect_transport(state.config)
+                        state.device = transport_factory(state.config)
                         sleep(0.5)
                         continue
                     if process_device_line(state):
@@ -252,7 +256,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
                                 f"(threshold: {watchdog_timeout}s), forcing reconnect"
                             )
                         state.device.close()
-                        state.device = connect_transport(state.config)
+                        state.device = transport_factory(state.config)
                         if state.device:
                             logger.info("%s watchdog: reconnected successfully", transport_label)
                             watchdog_logged = False
@@ -264,7 +268,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
                     now = time.time()
                     if now - last_reconnect_attempt >= reconnect_interval:
                         last_reconnect_attempt = now
-                        state.device = connect_transport(state.config)
+                        state.device = transport_factory(state.config)
                         if state.device:
                             logger.info("%s reconnected successfully", transport_label)
                             watchdog_logged = False
@@ -277,7 +281,7 @@ def _run(state: BridgeState, stats_thread: threading.Thread) -> None:
                 logger.warning("%s connection unavailable, trying to reconnect", transport_label)
                 if state.device:
                     state.device.close()
-                state.device = connect_transport(state.config)
+                state.device = transport_factory(state.config)
                 sleep(0.5)
 
             sleep(0.01)

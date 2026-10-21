@@ -8,8 +8,11 @@
   "patch_sha256": "9ddbd449b422aed28cff949da8bc4c6d87f3294bb93d16e281482612a742b00c",
   "host": {
     "receiver_path": "observer/meshcoretomqtt/bridge/ble_connection.py",
-    "receiver_sha256": "331bcd27b017288cac3f9d570cb61ce2da9c67c918e80ca0cecb7a262b3436e1",
-    "integration_commit": "b5295e60276ce92338fdaf6d5190d8b6a91d0624"
+    "receiver_sha256": "ff4c51dfc373da348be4c866e269d25770162c9fe932f035f260b266944b321c",
+    "source_authority": "current-committed-software-candidate",
+    "upstream_repository": "Cisien/meshcoretomqtt",
+    "upstream_base_commit": "9b4e022e298020ef3359b36d8c364931de058af5",
+    "previous_reviewed_receiver_sha256": "331bcd27b017288cac3f9d570cb61ce2da9c67c918e80ca0cecb7a262b3436e1"
   },
   "protocol": {
     "frame_header_bytes": 16,

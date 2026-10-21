@@ -70,6 +70,14 @@ class PublicExportTests(unittest.TestCase):
         for name in ("meshmapper.toml", "letsmesh.toml"):
             self.assertTrue(_is_allowed("observer/meshcoretomqtt/presets/" + name))
 
+    def test_public_host_contributor_guide_is_portable_and_included(self):
+        name = "observer/meshcoretomqtt/AGENTS.md"
+        self.assertTrue(_is_allowed(name))
+        text = (ROOT / name).read_text()
+        self.assertIn("No mocks in tests", text)
+        self.assertNotIn("../../docs/observer", text)
+        self.assertNotIn("OBS-005", text)
+
     def test_clean_export_has_a_new_root_and_only_allowlisted_paths(self):
         with public_source_fixture() as (source, output):
             result = create_public_export(source, output)

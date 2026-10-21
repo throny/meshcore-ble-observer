@@ -12,8 +12,9 @@ allowlist.
   provenance; it does not package this workspace, history, local build outputs,
   raw captures or recovery archives.
 - The bridge candidate generator exports only its explicit source/test/package
-  path allowlist as a patch against a pinned upstream base. It excludes README,
-  agent guidance, records, backups and arbitrary untracked files. It checks the
+  path allowlist as a patch against a pinned upstream base. It excludes private
+  workspace guidance, README, records, backups and arbitrary untracked files;
+  portable host `AGENTS.md` guidance is included and reviewed for upstream use. It checks the
   patch for local paths, embedded IPs, non-fixture device-address literals,
   local device-name markers and known host-specific service paths. A finding
   fails the candidate and the report omits matched values. This automated scan

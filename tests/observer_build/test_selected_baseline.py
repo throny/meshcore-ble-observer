@@ -26,7 +26,10 @@ def test_selected_baseline_binds_exact_series_host_and_protocol():
     assert selected["patch_sha256"] == "9ddbd449b422aed28cff949da8bc4c6d87f3294bb93d16e281482612a742b00c"
     receiver = ROOT / selected["host"]["receiver_path"]
     assert hashlib.sha256(receiver.read_bytes()).hexdigest() == selected["host"]["receiver_sha256"]
-    assert selected["host"]["receiver_sha256"] == "331bcd27b017288cac3f9d570cb61ce2da9c67c918e80ca0cecb7a262b3436e1"
+    assert selected["host"]["receiver_sha256"] == "ff4c51dfc373da348be4c866e269d25770162c9fe932f035f260b266944b321c"
+    assert selected["host"]["source_authority"] == "current-committed-software-candidate"
+    assert selected["host"]["upstream_base_commit"] == "9b4e022e298020ef3359b36d8c364931de058af5"
+    assert selected["host"]["previous_reviewed_receiver_sha256"] == "331bcd27b017288cac3f9d570cb61ce2da9c67c918e80ca0cecb7a262b3436e1"
     assert selected["protocol"] == {
         "frame_header_bytes": 16,
         "maximum_record_bytes_including_terminator": 544,

@@ -18,14 +18,17 @@ BRIDGE_BASE_SHA = "9b4e022e298020ef3359b36d8c364931de058af5"
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _ALLOW_PREFIXES = ("bridge/", "installer/", "nix/", "tests/", "scripts/", "systemd/", "presets/")
 _ALLOW_FILES = frozenset({
-    ".gitignore", "Dockerfile", "LICENSE", "auth_token.py", "flake.nix",
+    ".gitignore", "AGENTS.md", "Dockerfile", "LICENSE", "auth_token.py", "flake.nix",
     "config.ble-preflight.example.toml", "config.toml.example",
     "config_loader.py", "install.sh", "mctomqtt.py", "mctomqtt.service",
     "preflight_config.py", "pyproject.toml", "uv.lock",
 })
 _HOME_PATH = re.compile(r"(?<![A-Za-z0-9])/(?:home|Users|root)/[^/\s:'\"]+")
 _WINDOWS_HOME = re.compile(r"(?i)[A-Z]:(?:\\\\|\\)Users(?:\\\\|\\)[^\s\"'\\]+")
-_SAFE_WINDOWS_TEST_PATHS = frozenset({r"c:\users\foo", r"c:\\users\\foo"})
+_SAFE_WINDOWS_TEST_PATHS = frozenset({
+    r"c:\users\foo", r"c:\\users\\foo",
+    r"c:\users\example", r"c:\\users\\example",
+})
 
 
 def _test_summary(text: str) -> str:
