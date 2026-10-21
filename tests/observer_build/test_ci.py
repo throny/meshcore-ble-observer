@@ -136,7 +136,8 @@ class ReleaseCITests(unittest.TestCase):
         for required in ("persist-credentials: false", "contents: read", "retention-days: 7",
                          "upload-artifact@", "native_kiss_modem", "pytest -q tests/observer_build/",
                          "MCTOMQTT_SKIP_NETWORK", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
-                         "--system-certs", "--frozen", "provenance.json"):
+                         "--system-certs", "--frozen", "provenance.json",
+                         "GITHUB_TOKEN: ${{ github.token }}"):
             self.assertIn(required, workflow)
         self.assertIn("cron: '23 7 * * *'", workflow)
         self.assertIn("unapproved firmware candidate", workflow)

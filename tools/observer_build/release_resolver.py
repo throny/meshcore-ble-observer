@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 import re
 from typing import Sequence
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -57,13 +58,29 @@ def resolve_latest_repeater_release(releases: Sequence[ReleaseMetadata]) -> Rele
     return ReleasePin(tag=selected.tag, commit_sha=selected.commit_sha.lower())
 
 
-def _github_json_with_headers(url: str) -> tuple[object, str | None]:
+def _github_request(url: str, token: str | None = None) -> Request:
+    """Build an official API request; credentials are never forwarded on redirects."""
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or parsed.netloc != "api.github.com"
+            or parsed.username is not None or parsed.password is not None):
+        raise ReleaseResolutionError("Release metadata URL must use the official HTTPS GitHub API")
     request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "meshcore-observer-build"})
+    if token:
+        if "\r" in token or "\n" in token:
+            raise ReleaseResolutionError("GitHub API authentication value contains invalid line breaks")
+        request.add_unredirected_header("Authorization", f"Bearer {token}")
+    return request
+
+
+def _github_json_with_headers(url: str) -> tuple[object, str | None]:
+    token = os.environ.get("GITHUB_TOKEN")
+    request = _github_request(url, token)
     try:
         with urlopen(request, timeout=30) as response:
             return json.loads(response.read().decode("utf-8")), getattr(response, "getheader", lambda _name: None)("Link")
     except Exception as error:
-        raise ReleaseResolutionError(f"Could not read official MeshCore release metadata: {error}") from error
+        detail = str(error).replace(token, "<redacted>") if token else str(error)
+        raise ReleaseResolutionError(f"Could not read official MeshCore release metadata: {detail}") from None
 
 
 def _github_json(url: str) -> object:

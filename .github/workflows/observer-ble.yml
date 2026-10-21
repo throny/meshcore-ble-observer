@@ -53,6 +53,8 @@ jobs:
           tests/hardware/test_p1pro_public_backup.py
           tests/hardware/test_p1pro_usb_common.py
       - name: Resolve latest official stable release into clean detached source
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p out
           python - <<'PY'

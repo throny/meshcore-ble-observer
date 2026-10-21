@@ -1,6 +1,6 @@
 {
   "files": {
-    ".github/workflows/observer-ble.yml": "eb1d6894c0f58c50c09ba24e88a8f6c650ca1930c926f2954b906ed01a254fb6",
+    ".github/workflows/observer-ble.yml": "b7695acda92c15bd71522a6c7e37c67d12585f3d5ad69135cfef449ed3fccbd5",
     ".gitignore": "2b2eb9834adabc11949f130b9f46cc98bf1c627ab88d9ce42de81654d4a37af3",
     "CONTRIBUTING.md": "28f40cc387ec93eff97400999e1c852666ad878aefc3c0a0a72bb299f4f764c9",
     "README.md": "9301025fde246dd47fa61f4a204a1093d3bb0e9203208ea2f6f630a872384469",
@@ -118,13 +118,13 @@
     "tests/hardware/test_p1pro_usb_common.py": "774f9c4b94101f855df8f486bdd8e7843480f3037b0330df8ed6a09c2e93db0e",
     "tests/observer_build/test_bridge_candidate.py": "b829b2e92b6e54ad44cdda7bf2312a056123a712326c31b8ebebf47452ec88e3",
     "tests/observer_build/test_candidate.py": "9a523e3bcd2529c508e9ae58ffdf13045c177fed243bb1ad5656c7977ff57e74",
-    "tests/observer_build/test_ci.py": "3abaa2c0e8f3c192cf3cf16d0bb067f4589d91ac2a4328d0c0420dd2d982935f",
+    "tests/observer_build/test_ci.py": "2dfed109ba9fa12c8eff7af33f9a9cf663f14cc1a112468fa8e145a2b4725151",
     "tests/observer_build/test_lines544_series.py": "80f3b2959ca1d3f0df82d29474c3d6ae8ab5d73eda49774eec44f1f81b40166d",
     "tests/observer_build/test_native_compatibility.py": "40803dc73015b263bb483d4a9efdffa430ab6c92f6b5523d0449de9027e4fd81",
     "tests/observer_build/test_provenance.py": "5d75c8f145e065490edaa200e6916c40e4a1f3fdb49e51150c84fcfbcc29222b",
     "tests/observer_build/test_public_docs.py": "9a89ee84a95c4ee5ab8071fed7c12a23be77bcadf0ed213601fc0c789e5bdf73",
     "tests/observer_build/test_public_export.py": "7c7a7e422b6e8325ea4da70e4cab9884dfd0eec59afb7bdcaf83f6336a1032b7",
-    "tests/observer_build/test_release_resolver.py": "b27ab34f00c8167dabf2f7547596890426815f624fedb747fc6a5f986389d2a5",
+    "tests/observer_build/test_release_resolver.py": "8f0a4d2dc68b834528d6f41c69dcf85ae3798e74555b83eabb0697abfb384016",
     "tests/observer_build/test_selected_baseline.py": "b3dbb2e38b381887f40f3be1fb64cff45bac04e824e1f79c39df6ea0978e22d7",
     "tests/observer_build/test_source_validation.py": "3a32a95265adbc3bf217b53f2cdd4e324cd9a372bc2dd71655732177b81ca909",
     "tools/hardware/p1pro_public_backup.py": "a442fa7f4be38b748fe30386e298d55609444396a6b42171ef08661e0f543bfa",
@@ -137,7 +137,7 @@
     "tools/observer_build/candidate.py": "1c8ac8572e9eba8f0b33da1ad99c969bba87cd059f9455067f0552fdccd194ed",
     "tools/observer_build/native_compatibility.py": "ce7e61e3a7271ee10f464498f1cfedbb39725a272b617d237c954d70dd9bfbb1",
     "tools/observer_build/provenance.py": "d52d6aabd930a183e517a10f567043784aa98a89026c3b295efb0dfbba23766d",
-    "tools/observer_build/release_resolver.py": "37e3428cb49e721a0dcc4b32a9194661dba892d236428324f9786b2627591735",
+    "tools/observer_build/release_resolver.py": "c27940053d9be1293c672397689e642704ae59aa10d6d1945c7c91c817af8a33",
     "tools/observer_build/validate_patched_source.py": "acc4e0e8e394410e7cac38d3c3043cdd62146fa00d5a5fae71683aa3e5414fe0",
     "tools/observer_build_candidate.py": "dbbcb2c2568f6a84f58210414c97e47e01ec914473c0ecdc9c0a9da2c8af9421",
     "tools/public_export.py": "bb6ca46ee64c919c968fe69421c9ab2afd00a06a487e597c95904e7efadcaeca"

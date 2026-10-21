@@ -1,5 +1,6 @@
 import sys
 import unittest
+from urllib.request import HTTPRedirectHandler
 from unittest.mock import patch
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from observer_build.release_resolver import (
     ReleaseResolutionError,
     resolve_official_latest_repeater_release,
     resolve_latest_repeater_release,
+    _github_request,
 )
 
 
@@ -20,6 +22,25 @@ SHA_119 = "b" * 40
 
 
 class ReleaseResolverTests(unittest.TestCase):
+    def test_metadata_uses_optional_auth_without_forwarding_it_on_redirect(self):
+        request = _github_request("https://api.github.com/repos/example/project/releases", "synthetic-api-token")
+        self.assertEqual("Bearer synthetic-api-token", request.get_header("Authorization"))
+        redirect = HTTPRedirectHandler().redirect_request(
+            request, None, 302, "redirect", {}, "https://example.invalid/redirect"
+        )
+        self.assertIsNone(redirect.get_header("Authorization"))
+
+    def test_authenticated_metadata_refuses_non_github_or_insecure_targets(self):
+        for url in ("http://api.github.com/repos/example/project", "https://example.invalid/releases",
+                    "https://api.github.com.example.invalid/releases"):
+            with self.subTest(url=url):
+                with self.assertRaises(ReleaseResolutionError):
+                    _github_request(url, "synthetic-api-token")
+
+    def test_metadata_request_without_token_remains_anonymous(self):
+        request = _github_request("https://api.github.com/repos/example/project/releases")
+        self.assertIsNone(request.get_header("Authorization"))
+
     def test_legacy_letter_suffix_release_does_not_block_numeric_stable_selection(self):
         with patch("observer_build.release_resolver._github_json_with_headers", return_value=([
             {"tag_name": "repeater-v1.0.0c", "draft": False, "prerelease": False},
