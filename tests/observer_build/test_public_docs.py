@@ -29,12 +29,13 @@ class PublicDocumentationTests(unittest.TestCase):
 
     def test_hardware_scope_and_upstream_submission_boundaries_are_explicit(self):
         host = (ROOT / "docs/observer/bridge-setup.md").read_text(encoding="utf-8")
+        host_words = " ".join(host.split())
         contribution = (ROOT / "docs/observer/upstream-contributions.md").read_text(encoding="utf-8")
         self.assertIn("P1-Pro", host)
         self.assertIn("experimental", host)
-        self.assertIn("does not currently provide a supported one-command BLE installer", host)
-        self.assertIn("inherited upstream installer and shared serial unit are **not** BLE-hardened", host)
-        self.assertIn("Any service installation, enable/start, pairing change, production configuration, and rollback", host)
+        self.assertIn("There is no supported one-command BLE installer", host_words)
+        self.assertIn("The standard USB installer and service are not a supported BLE setup", host_words)
+        self.assertIn("Decide which device, settings and services to change before running anything", host_words)
         self.assertIn("Do not publish", contribution)
         self.assertIn("clean upstream", contribution)
         self.assertIn("candidate/export tools do not submit PRs", contribution)

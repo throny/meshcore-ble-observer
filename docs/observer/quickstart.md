@@ -1,26 +1,25 @@
-# Public quickstart: P1-Pro BLE observer
+# P1-Pro BLE observer quickstart
 
-This is a preparation guide, not a tested one-click installer. See the
-[public project overview](public-export-readme.md) for scope and limitations.
-The firmware is community custom firmware, not an
-official MeshCore image. Solar/RF suitability and full recovery remain unproven.
+This guide is for the experimental SenseCAP Solar / P1-Pro observer, not stock
+MeshCore firmware. Setup is manual. Read the [project overview](../../README.md)
+first; power use, radio performance and full recovery are still being evaluated.
 
 ## 1. Choose and review firmware
 
-Use a downloadable artifact from the scheduled/manual
-[Observer BLE Actions workflow](../../.github/workflows/observer-ble.yml) only
-after reviewing its artifact name and `provenance.json` (Repeater tag and full
-commit, patch series, toolchain, artifact hashes). Artifacts are short-lived
-**unapproved candidates**. The current patch series is pinned to one upstream
-version; if upstream advances incompatibly the workflow fails closed, rather
-than making an older build appear current. A green build does not mean firmware
-is supported, deployable, or safe for your device.
+Builds are available from the
+[Observer BLE workflow](../../.github/workflows/observer-ble.yml). Before using
+one, check its name and `provenance.json`: these identify the Repeater version,
+exact source revision, observer patches, build tools and file hashes.
+
+Downloads are short-lived **test candidates**, not approved releases. If newer
+upstream source is incompatible, the workflow reports a failure instead of
+silently using an older version. A successful build alone does not establish
+that an image is safe for your device.
 
 ## 2. Back up before any USB flash
 
-USB flashing is a separate manual operator action. Before starting, identify the
-device explicitly and preserve the official recovery image and recovery plan.
-Optionally capture public metadata/settings with the read-only helper:
+Identify the intended device and keep an official recovery image and a recovery
+plan before flashing. You can save a partial, read-only settings snapshot with:
 
 ```sh
 install -d -m 700 "$HOME/p1pro-backups"
@@ -28,46 +27,45 @@ python3 tools/hardware/p1pro_public_backup.py \
   --port /dev/ttyACM0 --destination "$HOME/p1pro-backups"
 ```
 
-Use the actual USB node you verified; do not infer device identity from its name.
-On first use, leaving out `--expected-public-key` is explicit trust-on-first-use:
-the helper checks the board and records the full public key, but cannot know that
-it is the intended repeater. For later captures, pin the complete key (not a
-prefix) with `--expected-public-key <64-hex-key>` and independently verify that
-key through a trusted record.
-The backup helper checks the board/public identity, sends only allowlisted read
-commands and writes a caller-owned mode-0600 JSON file inside an existing
-mode-0700 directory. The public-only snapshot is **not sufficient to restore
-device identity**. It contains no private key/ACL recovery material, is not a
-filesystem image and has not been restored or validated. Keep it private because
-settings can still be sensitive. Stop on any mismatch or read error. The helper
-does not reset, flash, or otherwise write to the device.
+Replace the example port with the USB device you verified. A port or device name
+alone does not prove which repeater it is. If you have a trusted identity record,
+add `--expected-public-key <64-hex-key>` using the complete key, not a prefix.
+Without that option, the helper records the key it finds but cannot establish
+that this is your intended repeater (trust on first use).
 
-If identity recovery is specifically needed, add `--include-private` to the same
-command. This is a separate opt-in: the helper prompts twice on the interactive
-terminal (never argv/environment), requires GPG, and writes a second mode-0600
-AES-encrypted artifact; the ordinary JSON file remains public-only. Keep the
-password separately and securely. The encrypted artifact may help manual key
-recovery but omits ACL/filesystem state, does not independently verify the
-keypair, and is **not a complete or validated restore**. Never feed either key
-material or password to a service installer. Do not use this recovery mode if
-you cannot securely retain and later retrieve its password. If you have a trusted
-full public-key record, also pass `--expected-public-key <64-hex-key>`; without
-it the command uses the explicit trust-on-first-use behavior above and cannot
-prove it is the intended physical repeater.
+The helper checks the board/identity, uses only permitted read commands and
+writes a caller-owned `0600` JSON file in an existing `0700` directory. It does
+not reset, flash or write to the device. Stop on a mismatch or read error.
 
-## 3. Flash only under an approved recovery plan
+**This is not a complete backup or a tested restore.** It contains no private
+key or access-control recovery data and is not a filesystem image. Keep even
+this public-only snapshot private: settings may still be sensitive.
 
-Select the exact supported board/application artifact and follow the vendor's
-USB procedure with the correct bootloader/recovery material available. Verify
-the result and identity using the approved procedure. No script here flashes,
-and no Actions artifact authorizes a flash. Do not continue if board, bootloader,
-artifact provenance, backup accessibility or rollback path is uncertain.
+### Optional encrypted identity capture
+
+Only if you need private identity recovery, add `--include-private`. This needs
+GPG and asks for the password twice in the interactive terminal, not in command
+arguments or environment variables. It creates a second, AES-encrypted `0600`
+file; the normal JSON stays public-only.
+
+Keep its password separately and securely. Without it, the encrypted file will
+not help you recover the key. This capture still omits access-control/filesystem
+state, does not independently verify the keypair, and is **not a complete or
+validated restore**. Use the trusted full-key check above when available. Never
+give a service installer the private key or this password.
+
+## 3. Check recovery before flashing
+
+Choose the exact image for the supported board and follow its USB procedure,
+with the correct bootloader and recovery files available. Check the device
+identity afterward. Do not continue if you are unsure of the board, bootloader,
+build origin, access to your backup or recovery method. The helper and build
+workflow do not flash anything for you.
 
 ## 4. Enroll and pair securely
 
-The observer firmware is P1-Pro/SenseCAP-specific. BLE observer mode is
-default-off. Physical USB access is required to explicitly enable and enroll;
-in the repeater's USB CLI run:
+Observer mode is off by default. With physical USB access to the P1-Pro, run
+these commands in its USB CLI to enable it and open enrollment:
 
 ```text
 observer status
@@ -77,42 +75,40 @@ observer enrollment status
 observer status
 ```
 
-Use the generated passkey in the Linux host's pairing prompt while enrollment
-is open. Enrollment cannot start while observer mode is off. Close an unused
-window with `observer enrollment close`; `observer revoke` revokes the existing
-peer and requires a fresh enrollment/pairing before it can observe again.
-These are deliberate device configuration actions, not backup-tool commands.
-Keep the
-generated passkey private, verify the intended Linux host is paired/trusted and pinned,
-and test revocation/re-pair under the approved device procedure. Never weaken
-bond/trust checks or use a Companion as the observer endpoint.
+Enter the generated passkey in the intended Linux host's pairing prompt while
+enrollment is open. Keep it private and check that the host is paired, trusted
+and pinned to the repeater. Enrollment cannot start while observer mode is off.
+
+Close an unused window with `observer enrollment close`. `observer revoke`
+removes the current peer; you must enroll and pair again before it can observe.
+These commands change the device, unlike the read-only backup helper. Test your
+revocation/re-pair procedure without weakening bond/trust checks. A Companion
+is not the endpoint for this repeater observer protocol.
 
 ## 5. Configure and install the bridge
 
-Use the explicit BLE config/preflight in the
-[generic Linux bridge guide](bridge-setup.md), not the generic shared serial
-installer as if it were BLE-hardened. Keep application/venv root-owned
-and non-service-writable; config is root-owned, service-group readable only
-(directory `0750`, TOML `0640`). Installation, service enable/start, and config
-writes are explicit operator actions; no automatic installer is provided.
+Follow the [Linux host guide](bridge-setup.md) using one explicit BLE config.
+The standard USB installer is not a supported BLE installer. Keep application
+files and the virtual environment root-owned so the service cannot change them.
+Config should be root-owned and readable only by the service group: directory
+`0750`, TOML `0640`.
 
-Choose each broker independently. For each `[[broker]]`, set its own
-`topics.iata`, distinct sanitized client identity and correct auth/TLS options.
-Do not use test IATA values as production or assume one broker is a fallback for
-the other. Production region/account/publication needs an operator-approved
-mapping. Never put a device private key or pairing passkey in bridge config; the
-trusted runtime uses the device key in memory for signing.
+Set each broker's endpoint, `topics.iata`, unique client ID and verified TLS/auth
+options separately. Confirm each service's region rules instead of using test
+values or assuming another broker's success proves delivery. Never put a device
+private key or pairing passkey in config; the runtime signs using the device
+key in memory. Starting a service and publishing to live brokers are steps you
+choose explicitly, not actions performed by the build workflow.
 
 ## 6. Diagnose, update, and roll back
 
-Use the host guide's explicit config preflight before a separately authorized
-service start; inspect `systemctl status` and the unit journal only on the
-intended host. Verify device attribution, both independent destinations, clean
-shutdown/reconnect and redaction. BLE ACK confirms complete host RAM
-reassembly—not MQTT receipt—and there is no durable MQTT replay queue.
+Run the config check before starting the service, then inspect its status and
+journal on the intended host. Check the device identity, each MQTT destination,
+clean shutdown/reconnect and logs for sensitive data. A BLE ACK confirms a
+complete record reached host RAM, not MQTT receipt. There is no durable MQTT
+replay queue.
 
-For updates, preserve the current known-good firmware/provenance and config,
-review the newly resolved upstream pin and patch result, and repeat the security,
-recovery and acceptance gates. Rollback is a deliberate operator action using
-the verified board-specific recovery procedure. No unattended update or
-rollback is implemented.
+Before updating, keep the working firmware, build details and config. Review
+the new source/patches and repeat the security, recovery and hardware checks.
+Rollback uses the verified board-specific recovery procedure; updates and
+rollback are not automatic.

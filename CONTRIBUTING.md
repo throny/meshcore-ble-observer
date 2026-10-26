@@ -1,53 +1,43 @@
-# Upstream contribution and privacy boundary
+# Contributing
 
-The project workspace preserves local acceptance records, protected backups,
-historical reports and environment-specific operational notes. **Do not publish
-this complete repository snapshot or its commit history as an upstream PR or
-public release.** Public status in this working tree is not a clean distribution
-allowlist.
+Keep firmware changes and host-bridge changes separate, and follow each upstream
+project's contribution guidelines. Start from a clean upstream checkout and
+include only the relevant implementation, tests and portable setup instructions.
 
-## Candidate/export boundary
+Do not publish private settings, backups, raw captures or local hardware records.
+Use made-up device identities in tests and preserve upstream licences and credits.
+This public snapshot is not a reason to copy a private workspace or its history
+into an upstream PR.
 
-- The firmware candidate artifact contains only firmware products and
-  provenance; it does not package this workspace, history, local build outputs,
-  raw captures or recovery archives.
-- The bridge candidate generator exports only its explicit source/test/package
-  path allowlist as a patch against a pinned upstream base. It excludes private
-  workspace guidance, README, records, backups and arbitrary untracked files;
-  portable host `AGENTS.md` guidance is included and reviewed for upstream use. It checks the
-  patch for local paths, embedded IPs, non-fixture device-address literals,
-  local device-name markers and known host-specific service paths. A finding
-  fails the candidate and the report omits matched values. This automated scan
-  is a guardrail, not a substitute for inspecting the exact generated patch.
-- Workflow artifacts are short-lived candidates; they do not publish a release
-  or PR. Review the exact upstream and overlay SHAs and inspect the patch before
-  any later distribution.
+## What the build tools publish
 
-To prepare a local review snapshot, use a fresh destination outside this
-checkout:
+- Firmware artifacts contain the build outputs and records of how they were
+  built, not private workspace history or recovery archives.
+- The host patch includes only an approved list of source, test and packaging
+  files. Portable `AGENTS.md` guidance is included; private notes and unrelated
+  untracked files are not.
+- A privacy scan rejects local paths, real device/network identifiers and known
+  deployment details without printing the matching values. Review the resulting
+  patch yourself too: the scan cannot guarantee that it is safe to publish.
+- Downloadable artifacts are test candidates. Review their exact upstream and
+  observer revisions before distributing or installing them.
+
+To create a clean source snapshot for review, choose a new destination outside
+the checkout:
 
 ```sh
 python3 tools/public_export.py --output /path/to/new-public-export
 ```
 
-The tool reads committed `HEAD` only, validates a per-file allowlist and privacy
-scan, writes a one-commit Git snapshot with no remote configured, and includes
-`PUBLIC-EXPORT-MANIFEST.json`. It refuses an existing/non-private destination;
-it neither pushes nor submits anything.
+The tool uses committed `HEAD`, checks its file list and runs the privacy scan.
+It creates a new Git history with one commit, no remote and a
+`PUBLIC-EXPORT-MANIFEST.json` file. It refuses an existing destination or one
+that is not private. It does not push or submit anything.
 
-## Preparing future PRs
+## Before sending a PR
 
-Prepare separate PR branches from clean upstream repositories (MeshCore and
-`Cisien/meshcoretomqtt` respectively), with only the relevant firmware/host
-implementation, tests and generic setup documentation. Preserve the upstream
-license and attribution. Do not carry this workspace's Git history, private
-remote configuration, STATUS/hardware evidence, operator-specific backup
-helper, local configuration, build directory or device records into those
-branches. Use synthetic identities/configs in tests. Keep P1-Pro validation
-claims distinct from experimental/unvalidated support for other boards or host
-models. Submitting, pushing, merging or publishing those PRs/releases requires a
-separate explicit decision.
-
-The candidate/export tools do not submit PRs or publish releases. Any upstream
-proposal is a separate, explicitly reviewed maintainer-facing action, not an
-automatic consequence of a green candidate build.
+Review the patch for unrelated files and private data. Describe exactly which
+hardware and tests you used; P1-Pro results do not establish support for other
+boards or hosts. A passing build does not approve a device update or release.
+The candidate/export tools do not submit PRs or publish releases: review and
+publication are separate steps chosen by the contributor.
