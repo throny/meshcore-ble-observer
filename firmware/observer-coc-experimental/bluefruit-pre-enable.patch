@@ -1,0 +1,20 @@
+diff --git a/libraries/Bluefruit52Lib/src/bluefruit.cpp b/libraries/Bluefruit52Lib/src/bluefruit.cpp
+--- a/libraries/Bluefruit52Lib/src/bluefruit.cpp
++++ b/libraries/Bluefruit52Lib/src/bluefruit.cpp
+@@ -101,4 +101,5 @@
+ extern "C"
+ {
+ void flash_nrf5x_event_cb (uint32_t event) ATTR_WEAK;
++uint32_t bluefruit_configure_peripheral(uint8_t config_tag, uint32_t ram_start) ATTR_WEAK;
+ }
+@@ -402,4 +403,10 @@
+     blecfg.conn_cfg.conn_cfg_tag = CONN_CFG_PERIPHERAL;
+     blecfg.conn_cfg.params.gattc_conn_cfg.write_cmd_tx_queue_size = _sd_cfg.prph.wrcmd_qsize;
+     VERIFY_STATUS ( sd_ble_cfg_set(BLE_CONN_CFG_GATTC, &blecfg, ram_start), false );
++
++    // Optional application configuration, before sd_ble_enable.
++    if (bluefruit_configure_peripheral)
++    {
++      VERIFY_STATUS ( bluefruit_configure_peripheral(CONN_CFG_PERIPHERAL, ram_start), false );
++    }
+   }

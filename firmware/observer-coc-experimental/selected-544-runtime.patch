@@ -1,0 +1,1219 @@
+diff --git a/src/observer/ObserverTransport.h b/src/observer/ObserverTransport.h
+--- a/src/observer/ObserverTransport.h
++++ b/src/observer/ObserverTransport.h
+@@ -12,6 +12,10 @@
+ #include "ObserverConnectionAdmission.h"
+ #include "ObserverDelivery.h"
+ #include "ObserverStatsSnapshot.h"
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++#include "ObserverBleRuntime.h"
++#include "coc/NordicPort.h"
++#endif
+ 
+ #if defined(SENSECAP_OBSERVER_TRANSPORT)
+ #if !defined(OBSERVER_TRANSPORT_PLATFORM_TEST)
+@@ -40,6 +44,11 @@
+   bool initialized() const { return initialized_; }
+   void service();
+   bool takeCommand(char* destination, size_t capacity);
++  bool authorizeCoC(uint16_t connection_handle) const;
++  static bool authorizeCoCLink(uint16_t connection_handle);
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  bool replyCoC(const uint8_t* bytes, size_t length);
++#endif
+   bool enable(bool enabled);
+   bool enrollmentOpen() const { return policy_.enrollmentOpen(millis()); }
+   bool revokePeer();
+@@ -67,6 +76,9 @@
+   BLECharacteristic command_characteristic_;
+   BLECharacteristic ack_characteristic_;
+   BLECharacteristic stats_characteristic_;
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  BLECharacteristic discovery_characteristic_;
++#endif
+   using Queue = RecordQueue<kLogQueueBytes, kLogQueueRecords>;
+   Queue* log_queue_ = nullptr;
+   LineBuffer<544, kLogQueueBytes, Queue>* line_buffer_ = nullptr;
+@@ -111,6 +123,13 @@
+   bool (*save_peer_)(bool, const PeerIdentity&) = nullptr;
+   uint16_t enrollment_handle_ = BLE_CONN_HANDLE_INVALID;
+   StatsSnapshot stats_snapshot_;
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  coc::NordicPort coc_port_{&Transport::authorizeCoCLink, &Transport::cocStats,
++                            &Transport::cocWake, &Transport::cocSchedule};
++  coc::Server coc_server_{coc_port_, SENSECAP_OBSERVER_COC_CHANNELS};
++  SoftwareTimer coc_timer_;
++  bool coc_timer_initialized_ = false;
++#endif
+ 
+   static void onConnect(uint16_t connection_handle);
+   static void onDisconnect(uint16_t connection_handle, uint8_t reason);
+@@ -120,6 +139,15 @@
+   static void onStats(uint16_t connection_handle, BLECharacteristic* characteristic, ble_gatts_evt_read_t* request);
+   static bool onPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request);
+   static void onPairComplete(uint16_t connection_handle, uint8_t auth_status);
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  static void onCoCBLEEvent(ble_evt_t* event);
++  static void onDiscovery(uint16_t connection_handle, BLECharacteristic* characteristic,
++                          ble_gatts_evt_read_t* request);
++  static size_t cocStats(char* bytes, size_t capacity);
++  static void cocWake();
++  static void cocSchedule(uint32_t delay_ms, bool enabled);
++  static void cocTimerCallback(TimerHandle_t timer);
++#endif
+   bool authorizedAndSecured(uint16_t connection_handle) const;
+   bool refreshNonce(bool rotate = false);
+   bool persistPeer(bool has_peer, const PeerIdentity& peer);
+diff --git a/src/observer/ObserverTransport.cpp b/src/observer/ObserverTransport.cpp
+--- a/src/observer/ObserverTransport.cpp
++++ b/src/observer/ObserverTransport.cpp
+@@ -18,6 +18,10 @@
+ constexpr uint8_t kCommandUuid[] = {0x1b, 0x5f, 0x6f, 0x04, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
+ constexpr uint8_t kAckUuid[] = {0x1b, 0x5f, 0x6f, 0x05, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
+ constexpr uint8_t kStatsUuid[] = {0x1b, 0x5f, 0x6f, 0x06, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++constexpr uint8_t kCocDiscoveryUuid[] = {0x1b, 0x5f, 0x6f, 0x07, 0x6b, 0x56, 0x48, 0x5e, 0xa3, 0x50, 0x61, 0x3c, 0x4a, 0x5d, 0xc2, 0x10};
++constexpr uint16_t kCocDescriptorBytes = 8;
++#endif
+ constexpr uint16_t kAdvertisingInterval = 1600;  // 1 second
+ constexpr uint16_t kNotificationBytes = 244;
+ }
+@@ -30,7 +34,11 @@
+     : enabled_(enabled), policy_(enabled),
+       service_(BLEUuid(kServiceUuid)), log_characteristic_(BLEUuid(kLogUuid)),
+       command_characteristic_(BLEUuid(kCommandUuid)), ack_characteristic_(BLEUuid(kAckUuid)),
+-      stats_characteristic_(BLEUuid(kStatsUuid)) {}
++      stats_characteristic_(BLEUuid(kStatsUuid))
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++      , discovery_characteristic_(BLEUuid(kCocDiscoveryUuid))
++#endif
++      {}
+ 
+ void Transport::attachPreferences(bool enabled, const PeerIdentity& peer, bool has_peer) {
+   enabled_ = enabled;
+@@ -50,11 +58,19 @@
+   policy_.setEnabled(true);
+   if (initialized_) return true;
+   instance_ = this;
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  coc_runtime::setObserverCallback(onCoCBLEEvent);
++#else
+   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
++#endif
+   // Suppress normal Bluetooth indication only; bootloader LEDs are independent.
+   Bluefruit.autoConnLed(false);
+   digitalWrite(LED_BLUE, 1 - LED_STATE_ON);
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  if (!coc_runtime::beginBluefruitOnce()) return failInitialization();
++#else
+   if (!Bluefruit.begin(1, 0)) return failInitialization();
++#endif
+   core_ready_ = true;
+   Bluefruit.setTxPower(0);
+   Bluefruit.setName(name);
+@@ -66,6 +82,13 @@
+   Bluefruit.Periph.setDisconnectCallback(onDisconnect);
+   Bluefruit.Security.setSecuredCallback(onSecured);
+   if (service_.begin() != NRF_SUCCESS) return failInitialization();
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  discovery_characteristic_.setProperties(CHR_PROPS_READ);
++  discovery_characteristic_.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_NO_ACCESS);
++  discovery_characteristic_.setMaxLen(kCocDescriptorBytes);
++  discovery_characteristic_.setReadAuthorizeCallback(onDiscovery);
++  if (discovery_characteristic_.begin() != NRF_SUCCESS) return failInitialization();
++#else
+   log_characteristic_.setProperties(CHR_PROPS_NOTIFY);
+   log_characteristic_.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_NO_ACCESS);
+   log_characteristic_.setMaxLen(kNotificationBytes);
+@@ -85,6 +108,7 @@
+   stats_characteristic_.setMaxLen(128);
+   stats_characteristic_.setReadAuthorizeCallback(onStats);
+   if (stats_characteristic_.begin() != NRF_SUCCESS) return failInitialization();
++#endif
+   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+   Bluefruit.Advertising.addService(service_);
+   Bluefruit.ScanResponse.addName();
+@@ -136,6 +160,14 @@
+   const bool allowed = policy_.authorizes(true, identity, millis());
+   if (!allowed && !policy_.enrollmentOpen(millis())) connection->disconnect();
+   return allowed;
++}
++
++bool Transport::authorizeCoC(uint16_t handle) const {
++  return handle == connectionHandle() && authorizedAndSecured(handle);
++}
++
++bool Transport::authorizeCoCLink(uint16_t handle) {
++  return transport.authorizeCoC(handle);
+ }
+ 
+ void Transport::setConnectionHandle(uint16_t handle) {
+@@ -289,6 +321,60 @@
+   sd_ble_gatts_rw_authorize_reply(handle, &reply);
+ }
+ 
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++void Transport::onCoCBLEEvent(ble_evt_t* event) {
++  if (instance_ && event) instance_->coc_server_.event(*event);
++}
++
++void Transport::onDiscovery(uint16_t handle, BLECharacteristic*, ble_gatts_evt_read_t* request) {
++  if (!instance_ || !request || !instance_->authorizeCoC(handle)) return;
++  uint8_t descriptor[kCocDescriptorBytes] = {
++      1, static_cast<uint8_t>(SENSECAP_OBSERVER_COC_CHANNELS),
++      static_cast<uint8_t>(coc::Server::kDataPsm), static_cast<uint8_t>(coc::Server::kDataPsm >> 8),
++      static_cast<uint8_t>(SENSECAP_OBSERVER_COC_CHANNELS == 2 ? coc::Server::kControlPsm : 0),
++      static_cast<uint8_t>(SENSECAP_OBSERVER_COC_CHANNELS == 2 ? coc::Server::kControlPsm >> 8 : 0),
++      static_cast<uint8_t>(coc::kSduBytes), static_cast<uint8_t>(coc::kSduBytes >> 8)};
++  if (request->offset > sizeof(descriptor)) return;
++  ble_gatts_rw_authorize_reply_params_t reply{};
++  reply.type = BLE_GATTS_AUTHORIZE_TYPE_READ;
++  reply.params.read.gatt_status = BLE_GATT_STATUS_SUCCESS;
++  reply.params.read.update = 1;
++  reply.params.read.len = sizeof(descriptor) - request->offset;
++  reply.params.read.offset = request->offset;
++  reply.params.read.p_data = descriptor + request->offset;
++  (void)sd_ble_gatts_rw_authorize_reply(handle, &reply);
++}
++
++size_t Transport::cocStats(char* bytes, size_t capacity) {
++  if (!instance_ || !bytes || !capacity) return 0;
++  return formatStats(instance_->stats_snapshot_.read(), bytes, capacity);
++}
++
++void Transport::cocTimerCallback(TimerHandle_t) {}
++
++void Transport::cocWake() {
++  if (!instance_ || !instance_->coc_timer_initialized_) return;
++  instance_->coc_timer_.setPeriod(1);
++  instance_->coc_timer_.start();
++}
++
++void Transport::cocSchedule(uint32_t delay_ms, bool enabled) {
++  if (!instance_) return;
++  Transport& t = *instance_;
++  if (!t.coc_timer_initialized_) {
++    t.coc_timer_.begin(1, cocTimerCallback, &t, false);
++    t.coc_timer_initialized_ = t.coc_timer_.getHandle() != nullptr;
++  }
++  if (!t.coc_timer_initialized_) return;
++  if (!enabled) {
++    t.coc_timer_.stop();
++    return;
++  }
++  t.coc_timer_.setPeriod(delay_ms ? delay_ms : 1);
++  t.coc_timer_.start();
++}
++#endif
++
+ bool Transport::onPasskey(uint16_t handle, uint8_t const passkey[6], bool match_request) {
+   if (!instance_ || match_request ||
+       __atomic_load_n(&instance_->passkey_allowed_handle_, __ATOMIC_ACQUIRE) != handle) return false;
+@@ -303,8 +389,18 @@
+ }
+ 
+ bool Transport::takeCommand(char* destination, size_t capacity) {
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  return coc_server_.takeCommand(destination, capacity);
++#else
+   return command_ingress_.takeCommand(destination, capacity);
+-}
++#endif
++}
++
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++bool Transport::replyCoC(const uint8_t* bytes, size_t length) {
++  return coc_server_.reply(bytes, length, static_cast<uint32_t>(millis()));
++}
++#endif
+ 
+ size_t Transport::writeLog(const uint8_t* bytes, size_t length) {
+   if (!enabled_) return length;
+@@ -323,6 +419,9 @@
+         unavailable_line_bytes_ = 0;
+       }
+     } else line_buffer_->write(bytes[index]);
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++    if (bytes[index] == '\n') cocWake();
++#endif
+   }
+   return length;
+ }
+@@ -484,7 +583,22 @@
+   if (log_queue_ && log_queue_->sequenceExhausted() && refreshNonce(true)) {
+     log_queue_->setBootNonce(boot_nonce_);
+   }
+-  if (policy_.enrollmentOpen(millis())) return;
++  if (policy_.enrollmentOpen(millis())) {
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++    coc_server_.close();
++    coc_server_.service(log_queue_, boot_nonce_, static_cast<uint32_t>(millis()));
++#endif
++    return;
++  }
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  if (!enabled_) {
++    coc_server_.close();
++    coc_server_.service(static_cast<Queue*>(nullptr), 0, static_cast<uint32_t>(millis()));
++    return;
++  }
++  coc_server_.service(log_queue_, boot_nonce_, static_cast<uint32_t>(millis()));
++  return;
++#else
+   if (!ack_length_) ack_ingress_.take(ack_, sizeof(ack_), ack_length_);
+   if (ack_length_) { processAck(ack_, ack_length_); ack_length_ = 0; }
+   const uint16_t handle = connectionHandle();
+@@ -524,6 +638,7 @@
+     delivery_.fragmentFailed();
+     __atomic_store_n(&complete_record_sent_, false, __ATOMIC_RELEASE);
+   }
++#endif
+ }
+ 
+ size_t LogMirror::write(uint8_t byte) { return transport.writeLog(&byte, 1); }
+diff --git a/src/helpers/nrf52/SerialBLEInterface.cpp b/src/helpers/nrf52/SerialBLEInterface.cpp
+--- a/src/helpers/nrf52/SerialBLEInterface.cpp
++++ b/src/helpers/nrf52/SerialBLEInterface.cpp
+@@ -1,4 +1,7 @@
+ #include "SerialBLEInterface.h"
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++#include <observer/ObserverBleRuntime.h>
++#endif
+ #include <stdio.h>
+ #include <string.h>
+ #include "ble_gap.h"
+@@ -135,8 +138,12 @@
+     Bluefruit.autoConnLed(true);  // true leaves the default automatic control of the LED by the Bluefruit library
+   #endif
+   
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  if (!observer::coc_runtime::beginBluefruitOnce()) return;
++#else
+   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
+   Bluefruit.begin();
++#endif
+  
+   char dev_name[32+16];
+   if (strcmp(name, "@@MAC") == 0) {
+@@ -179,7 +186,11 @@
+   Bluefruit.Periph.setDisconnectCallback(onDisconnect);
+   Bluefruit.Security.setSecuredCallback(onSecured);
+ 
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++  observer::coc_runtime::setLegacyCallback(onBLEEvent);
++#else
+   Bluefruit.setEventCallback(onBLEEvent);
++#endif
+ 
+   bleuart.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);
+   bleuart.begin();
+diff --git a/examples/simple_repeater/main.cpp b/examples/simple_repeater/main.cpp
+--- a/examples/simple_repeater/main.cpp
++++ b/examples/simple_repeater/main.cpp
+@@ -134,10 +134,14 @@
+   if (observer::transport.takeCommand(observer_command, sizeof(observer_command))) {
+     char reply[160] = {};
+     the_mesh.handleObserverCommand(observer_command, reply);
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++    observer::transport.replyCoC(reinterpret_cast<const uint8_t*>(reply), strlen(reply));
++#else
+     if (reply[0]) {
+       observer::logOutput().print(reply);
+       observer::logOutput().print("\r\n");
+     }
++#endif
+   }
+ #endif
+   // Handle Serial CLI
+diff --git a/examples/simple_repeater/MyMesh.h b/examples/simple_repeater/MyMesh.h
+--- a/examples/simple_repeater/MyMesh.h
++++ b/examples/simple_repeater/MyMesh.h
+@@ -73,6 +73,10 @@
+   #define FIRMWARE_BUILD_DATE   "15 Oct 2026"
+ #endif
+ 
+ #ifndef FIRMWARE_VERSION
+-  #define FIRMWARE_VERSION   "v1.18.0"
++  #if defined(SENSECAP_OBSERVER_COC_CHANNELS) && SENSECAP_OBSERVER_COC_CHANNELS > 0
++    #define FIRMWARE_VERSION   "v1.18.0-coc"
++  #else
++    #define FIRMWARE_VERSION   "v1.18.0-obs544"
++  #endif
+ #endif
+diff --git a/variants/sensecap_solar/platformio.ini b/variants/sensecap_solar/platformio.ini
+--- a/variants/sensecap_solar/platformio.ini
++++ b/variants/sensecap_solar/platformio.ini
+@@ -122,4 +122,5 @@
+   -I src
+ build_src_filter = ${SenseCap_Solar.build_src_filter}
+   +<observer/*.cpp>
++  +<observer/coc/S140Config.cpp>
+   +<../examples/simple_repeater/*.cpp>
+diff --git a/src/observer/ObserverBleRuntime.h b/src/observer/ObserverBleRuntime.h
+new file mode 100644
+--- /dev/null
++++ b/src/observer/ObserverBleRuntime.h
+@@ -0,0 +1,17 @@
++#pragma once
++
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++#include <bluefruit.h>
++
++namespace observer {
++namespace coc_runtime {
++
++using EventCallback = void (*)(ble_evt_t*);
++
++bool beginBluefruitOnce();
++void setObserverCallback(EventCallback callback);
++void setLegacyCallback(EventCallback callback);
++
++}  // namespace coc_runtime
++}  // namespace observer
++#endif
+diff --git a/src/observer/ObserverBleRuntime.cpp b/src/observer/ObserverBleRuntime.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/observer/ObserverBleRuntime.cpp
+@@ -0,0 +1,49 @@
++#include "ObserverBleRuntime.h"
++
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++namespace observer {
++namespace coc_runtime {
++namespace {
++EventCallback observer_callback = nullptr;
++EventCallback legacy_callback = nullptr;
++bool callback_installed = false;
++bool begin_attempted = false;
++bool begin_succeeded = false;
++
++void dispatch(ble_evt_t* event) {
++  EventCallback legacy = legacy_callback;
++  EventCallback observer = observer_callback;
++  if (legacy) legacy(event);
++  if (observer) observer(event);
++}
++
++void ensureEventDispatcher() {
++  if (!callback_installed) {
++    Bluefruit.setEventCallback(dispatch);
++    callback_installed = true;
++  }
++}
++}
++
++bool beginBluefruitOnce() {
++  if (!begin_attempted) {
++    begin_attempted = true;
++    Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
++    begin_succeeded = Bluefruit.begin(1, 0);
++  }
++  return begin_succeeded;
++}
++
++void setObserverCallback(EventCallback callback) {
++  observer_callback = callback;
++  ensureEventDispatcher();
++}
++
++void setLegacyCallback(EventCallback callback) {
++  legacy_callback = callback;
++  ensureEventDispatcher();
++}
++
++}  // namespace coc_runtime
++}  // namespace observer
++#endif
+diff --git a/src/observer/coc/Delivery.h b/src/observer/coc/Delivery.h
+new file mode 100644
+--- /dev/null
++++ b/src/observer/coc/Delivery.h
+@@ -0,0 +1,204 @@
++#pragma once
++
++#include "Protocol.h"
++
++namespace observer {
++struct RecordFragment;
++namespace coc {
++
++enum class Action : uint8_t { Idle, Retry, Close };
++
++// Loop-owned state only. Stack callbacks must use a bounded synchronized event
++// handoff; this class is not thread-safe and does not authorize a peer/channel.
++// Keep the object alive until all vendor-owned buffers have been returned.
++class Delivery {
++ public:
++  Delivery() = default;
++  Delivery(const Delivery&) = delete;
++  Delivery& operator=(const Delivery&) = delete;
++  Delivery(Delivery&&) = delete;
++  Delivery& operator=(Delivery&&) = delete;
++
++  bool open(uint32_t generation) {
++    if (!closed_ || owned_ || generation == 0 || generation <= generation_) return false;
++    generation_ = generation;
++    closed_ = false;
++    acknowledged_ = false;
++    attempts_ = 0;
++    wait_ = Wait::None;
++    submit_ready_ = pending();
++    return true;
++  }
++
++  template <typename Queue, typename Fragment = RecordFragment>
++  bool load(Queue& queue) {
++    if (closed_ || pending() || owned_ || queue.empty()) return false;
++    queue.restartHead();
++    // This is a ring-storage copy, not BLE fragmentation or reassembly.
++    uint64_t session = 0;
++    uint32_t sequence = 0;
++    size_t total = 0;
++    size_t copied = 0;
++    do {
++      Fragment fragment;
++      if (!queue.peek(fragment, kRecordBytes)) {
++        queue.restartHead();
++        return false;
++      }
++      if (copied == 0) {
++        session = fragment.boot_nonce;
++        sequence = fragment.sequence;
++        total = fragment.total_length;
++      }
++      if (session == 0 || sequence == 0 || total == 0 || total > kRecordBytes ||
++          fragment.boot_nonce != session || fragment.sequence != sequence ||
++          fragment.total_length != total || fragment.offset != copied || !fragment.bytes ||
++          fragment.length == 0 || fragment.length > total - copied) {
++        queue.restartHead();
++        return false;
++      }
++      memcpy(storage_ + kHeaderBytes + copied, fragment.bytes, fragment.length);
++      if (!queue.consume(session, sequence, fragment.length)) {
++        queue.restartHead();
++        return false;
++      }
++      copied += fragment.length;
++    } while (copied < total);
++    if (!encode(Kind::Record, session, sequence, storage_ + kHeaderBytes,
++                total, storage_, sizeof(storage_)) || !queue.acknowledge(session, sequence)) {
++      queue.restartHead();
++      return false;
++    }
++    // Local queue -> pending ownership transfer, NOT host receipt. Never later
++    // acknowledge the queue head from a CoC receipt: it may already be different.
++    session_ = session;
++    sequence_ = sequence;
++    size_ = static_cast<uint16_t>(total + kHeaderBytes);
++    acknowledged_ = false;
++    attempts_ = 0;
++    submit_ready_ = true;
++    wait_ = Wait::None;
++    return true;
++  }
++
++  bool ready(uint32_t now) const {
++    return !closed_ && pending() && !owned_ && !acknowledged_ &&
++        submit_ready_ && attempts_ < 3 && !expired(now);
++  }
++
++  // Call only after ready(now) and a successful vendor submit, using the SAME
++  // sampled now. On vendor resource failure call resourcesBusy instead. The
++  // real adapter must serialize this transaction with callback event processing.
++  bool submitAccepted(uint32_t generation, uint32_t now) {
++    if (generation != generation_ || !ready(now)) return false;
++    owned_ = true;
++    submit_ready_ = false;
++    ++attempts_;
++    wait_ = Wait::Tx;
++    wait_started_ = now;
++    return true;
++  }
++
++  bool resourcesBusy(uint32_t generation, uint32_t now) {
++    if (generation != generation_ || closed_ || !pending() || owned_ || acknowledged_ ||
++        (wait_ != Wait::None && wait_ != Wait::Resources)) return false;
++    if (wait_ != Wait::Resources) wait_started_ = now;
++    wait_ = Wait::Resources;
++    submit_ready_ = false;
++    return true;
++  }
++
++  bool resourcesAvailable(uint32_t generation) {
++    if (generation != generation_ || closed_ || wait_ != Wait::Resources) return false;
++    submit_ready_ = true;  // Absolute stall deadline deliberately unchanged.
++    return true;
++  }
++
++  bool returned(uint32_t generation, const uint8_t* pointer, uint32_t now) {
++    if (generation != generation_ || !owned_ || pointer != storage_) return false;
++    owned_ = false;
++    if (acknowledged_) retire();
++    else if (!closed_) {
++      wait_ = Wait::Receipt;
++      wait_started_ = now;
++    }
++    return true;
++  }
++
++  bool receipt(uint32_t generation, uint64_t session, uint32_t sequence) {
++    if (closed_ || generation != generation_ || !pending() || attempts_ == 0 ||
++        session != session_ || sequence != sequence_) return false;
++    acknowledged_ = true;
++    submit_ready_ = false;
++    if (!owned_) retire();
++    return true;
++  }
++
++  Action poll(uint32_t now) {
++    if (closed_ || !expired(now)) return Action::Idle;
++    if (wait_ != Wait::Receipt || attempts_ >= 3) {
++      close();
++      return Action::Close;
++    }
++    wait_ = Wait::None;
++    submit_ready_ = true;
++    return Action::Retry;
++  }
++
++  void close() {
++    closed_ = true;
++    submit_ready_ = false;
++    wait_ = Wait::None;
++    // Outstanding vendor ownership and unreceipted bytes survive channel loss.
++  }
++
++  bool wakeDelay(uint32_t now, uint32_t& delay) const {
++    if (closed_ || !pending()) return false;
++    if (ready(now) || expired(now)) { delay = 0; return true; }
++    if (wait_ == Wait::None) return false;
++    const uint32_t interval = wait_ == Wait::Receipt ? 5000 : 15000;
++    delay = interval - static_cast<uint32_t>(now - wait_started_);
++    return true;
++  }
++
++  bool pending() const { return size_ != 0; }
++  bool vendorOwned() const { return owned_; }
++  bool closed() const { return closed_; }
++  uint8_t attempts() const { return attempts_; }
++  uint64_t session() const { return session_; }
++  uint32_t sequence() const { return sequence_; }
++  size_t size() const { return size_; }
++  const uint8_t* data() const { return pending() ? storage_ : nullptr; }
++
++ private:
++  enum class Wait : uint8_t { None, Resources, Tx, Receipt };
++
++  bool expired(uint32_t now) const {
++    if (wait_ == Wait::None) return false;
++    const uint32_t interval = wait_ == Wait::Receipt ? 5000 : 15000;
++    return static_cast<uint32_t>(now - wait_started_) >= interval;
++  }
++
++  void retire() {
++    size_ = 0;
++    acknowledged_ = false;
++    submit_ready_ = false;
++    wait_ = Wait::None;
++  }
++
++  uint8_t storage_[kSduBytes]{};
++  uint64_t session_ = 0;
++  uint32_t sequence_ = 0;
++  uint32_t generation_ = 0;
++  uint32_t wait_started_ = 0;
++  uint16_t size_ = 0;
++  uint8_t attempts_ = 0;
++  Wait wait_ = Wait::None;
++  bool owned_ = false;
++  bool acknowledged_ = false;
++  bool submit_ready_ = false;
++  bool closed_ = true;
++};
++
++}  // namespace coc
++}  // namespace observer
+diff --git a/src/observer/coc/NordicPort.h b/src/observer/coc/NordicPort.h
+new file mode 100644
+--- /dev/null
++++ b/src/observer/coc/NordicPort.h
+@@ -0,0 +1,73 @@
++#pragma once
++
++#include "Server.h"
++
++namespace observer {
++namespace coc {
++
++// S140 adapter. Authorization is deliberately delegated to the existing
++// observer policy only after both Bluefruit and GAP report a bonded MITM link.
++// Callback hooks keep loop scheduling/stats owned by the selected integration.
++class NordicPort final : public Port {
++ public:
++  using Authorize = bool (*)(uint16_t);
++  using Stats = size_t (*)(char*, size_t);
++  using Wake = void (*)();
++  using Schedule = void (*)(uint32_t, bool);
++
++  NordicPort(Authorize authorize, Stats stats, Wake wake, Schedule schedule)
++      : authorize_(authorize), stats_(stats), wake_(wake), schedule_(schedule) {}
++
++  uint32_t authorizes(uint16_t handle) override {
++    ble_gap_conn_sec_t security{};
++    const uint32_t result = sd_ble_gap_conn_sec_get(handle, &security);
++    if (result != NRF_SUCCESS) return result;
++    if (security.sec_mode.sm != 1 || security.sec_mode.lv < 3)
++      return BLE_L2CAP_CH_STATUS_CODE_INSUFF_AUTHENTICATION;
++    // The callback must perform the application's bonded/secured and enrolled
++    // peer check before it may read getPeerAddr().
++    return authorize_ && authorize_(handle) ? BLE_L2CAP_CH_STATUS_CODE_SUCCESS
++                                            : BLE_L2CAP_CH_STATUS_CODE_INSUFF_AUTHORIZATION;
++  }
++
++  uint32_t accept(uint16_t handle, uint16_t& cid, uint8_t* rx, uint16_t length) override {
++    ble_l2cap_ch_setup_params_t params{};
++    params.status = BLE_L2CAP_CH_STATUS_CODE_SUCCESS;
++    params.rx_params.rx_mtu = length;
++    params.rx_params.rx_mps = BLE_L2CAP_MPS_MIN;
++    params.rx_params.sdu_buf = {rx, length};
++    return sd_ble_l2cap_ch_setup(handle, &cid, &params);
++  }
++  void refuse(uint16_t handle, uint16_t cid, uint16_t status) override {
++    ble_l2cap_ch_setup_params_t params{};
++    params.status = status;
++    (void)sd_ble_l2cap_ch_setup(handle, &cid, &params);
++  }
++  uint32_t receive(uint16_t handle, uint16_t cid, uint8_t* rx, uint16_t length) override {
++    ble_data_t data{rx, length};
++    return sd_ble_l2cap_ch_rx(handle, cid, &data);
++  }
++  uint32_t send(uint16_t handle, uint16_t cid, const uint8_t* bytes, uint16_t length) override {
++    ble_data_t data{const_cast<uint8_t*>(bytes), length};
++    return sd_ble_l2cap_ch_tx(handle, cid, &data);
++  }
++  void release(uint16_t handle, uint16_t cid) override {
++    (void)sd_ble_l2cap_ch_release(handle, cid);
++  }
++  size_t stats(char* bytes, size_t capacity) override {
++    return stats_ ? stats_(bytes, capacity) : 0;
++  }
++  void wake() override { if (wake_) wake_(); }
++  void schedule(uint32_t delay_ms, bool enabled) override {
++    if (schedule_) schedule_(delay_ms, enabled);
++  }
++
++ private:
++  Authorize authorize_;
++  Stats stats_;
++  Wake wake_;
++  Schedule schedule_;
++};
++
++}  // namespace coc
++}  // namespace observer
+diff --git a/src/observer/coc/Protocol.h b/src/observer/coc/Protocol.h
+new file mode 100644
+--- /dev/null
++++ b/src/observer/coc/Protocol.h
+@@ -0,0 +1,85 @@
++#pragma once
++
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++namespace observer {
++namespace coc {
++
++// Local experimental observer contract, not a Bluetooth profile allocation.
++constexpr size_t kHeaderBytes = 14;
++constexpr size_t kRecordBytes = 544;
++constexpr size_t kSduBytes = kHeaderBytes + kRecordBytes;
++
++enum class Kind : uint8_t {
++  Hello = 1, Ready, Record, Receipt, Command, Reply, StatsRequest, StatsReply
++};
++enum class Direction : uint8_t { ToDevice, ToHost };
++
++struct Packet {
++  Kind kind = Kind::Hello;
++  uint64_t session = 0;
++  uint32_t id = 0;
++  const uint8_t* payload = nullptr;
++  size_t length = 0;
++};
++
++inline bool toDevice(Kind kind) {
++  return kind == Kind::Ready || kind == Kind::Receipt ||
++      kind == Kind::Command || kind == Kind::StatsRequest;
++}
++
++inline bool validPayload(Kind kind, uint32_t id, const uint8_t* bytes, size_t length) {
++  const uint8_t value = static_cast<uint8_t>(kind);
++  if (value < 1 || value > 8 || (length != 0 && !bytes)) return false;
++  if (kind == Kind::Hello || kind == Kind::Ready) {
++    return id == 0 && length == 2 && bytes[0] == 0x20 && bytes[1] == 2;
++  }
++  if (id == 0) return false;
++  if (kind == Kind::Receipt || kind == Kind::StatsRequest) return length == 0;
++  if (kind == Kind::Command) {
++    if (length == 0 || length > 95) return false;
++    for (size_t i = 0; i < length; ++i) {
++      if (bytes[i] == 0 || bytes[i] == '\r' || bytes[i] == '\n') return false;
++    }
++    return true;  // Existing command allowlist remains a separate admission gate.
++  }
++  const size_t maximum = kind == Kind::StatsReply ? 128 : kRecordBytes;
++  return length != 0 && length <= maximum;
++}
++
++// Decode borrows the caller's complete SDU. It neither authenticates a peer nor
++// authorizes a handshake/session/command. Callers must enforce those separately.
++inline bool decode(const uint8_t* bytes, size_t length, Direction direction, Packet& packet) {
++  packet = Packet();
++  if (!bytes || length < kHeaderBytes || length > kSduBytes || bytes[0] != 1) return false;
++  const Kind kind = static_cast<Kind>(bytes[1]);
++  if (toDevice(kind) != (direction == Direction::ToDevice)) return false;
++  uint64_t session = 0;
++  uint32_t id = 0;
++  for (unsigned i = 0; i < 8; ++i) session |= static_cast<uint64_t>(bytes[2 + i]) << (8 * i);
++  for (unsigned i = 0; i < 4; ++i) id |= static_cast<uint32_t>(bytes[10 + i]) << (8 * i);
++  if (session == 0 || !validPayload(kind, id, bytes + kHeaderBytes, length - kHeaderBytes)) return false;
++  packet.kind = kind;
++  packet.session = session;
++  packet.id = id;
++  packet.payload = bytes + kHeaderBytes;
++  packet.length = length - kHeaderBytes;
++  return true;
++}
++
++inline size_t encode(Kind kind, uint64_t session, uint32_t id, const uint8_t* bytes,
++                     size_t length, uint8_t* output, size_t capacity) {
++  if (!output || session == 0 || !validPayload(kind, id, bytes, length) ||
++      capacity < kHeaderBytes + length) return 0;
++  if (length) memmove(output + kHeaderBytes, bytes, length);
++  output[0] = 1;
++  output[1] = static_cast<uint8_t>(kind);
++  for (unsigned i = 0; i < 8; ++i) output[2 + i] = static_cast<uint8_t>(session >> (8 * i));
++  for (unsigned i = 0; i < 4; ++i) output[10 + i] = static_cast<uint8_t>(id >> (8 * i));
++  return kHeaderBytes + length;
++}
++
++}  // namespace coc
++}  // namespace observer
+diff --git a/src/observer/coc/S140Config.cpp b/src/observer/coc/S140Config.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/observer/coc/S140Config.cpp
+@@ -0,0 +1,22 @@
++// This optional object supplies the experimental framework hook. It does not
++// accept a channel or replace the observer's security/enrollment policy.
++#if defined(SENSECAP_OBSERVER_COC_CHANNELS)
++
++#include <ble.h>
++
++#if SENSECAP_OBSERVER_COC_CHANNELS != 1 && SENSECAP_OBSERVER_COC_CHANNELS != 2
++#error "The observer CoC experiment supports one or two channels only"
++#endif
++
++extern "C" uint32_t bluefruit_configure_peripheral(uint8_t config_tag, uint32_t ram_start) {
++  ble_cfg_t config = {};
++  config.conn_cfg.conn_cfg_tag = config_tag;
++  config.conn_cfg.params.l2cap_conn_cfg.ch_count = SENSECAP_OBSERVER_COC_CHANNELS;
++  config.conn_cfg.params.l2cap_conn_cfg.rx_mps = 128;
++  config.conn_cfg.params.l2cap_conn_cfg.tx_mps = 128;
++  config.conn_cfg.params.l2cap_conn_cfg.rx_queue_size = 1;
++  config.conn_cfg.params.l2cap_conn_cfg.tx_queue_size = 1;
++  return sd_ble_cfg_set(BLE_CONN_CFG_L2CAP, &config, ram_start);
++}
++
++#endif
+diff --git a/src/observer/coc/Server.h b/src/observer/coc/Server.h
+new file mode 100644
+--- /dev/null
++++ b/src/observer/coc/Server.h
+@@ -0,0 +1,383 @@
++#pragma once
++
++#include <ble.h>
++#include "Delivery.h"
++#include "../ObserverCommand.h"
++
++namespace observer {
++namespace coc {
++
++// The concrete port uses the existing stack and enrolled-peer policy. Native
++// tests inject only this vendor boundary, not replacement BLE headers/stack.
++struct Port {
++  virtual ~Port() = default;
++  virtual uint32_t authorizes(uint16_t handle) = 0;
++  virtual uint32_t accept(uint16_t handle, uint16_t& cid, uint8_t* rx, uint16_t length) = 0;
++  virtual void refuse(uint16_t handle, uint16_t cid, uint16_t status) = 0;
++  virtual uint32_t receive(uint16_t handle, uint16_t cid, uint8_t* rx, uint16_t length) = 0;
++  virtual uint32_t send(uint16_t handle, uint16_t cid, const uint8_t* bytes, uint16_t length) = 0;
++  virtual void release(uint16_t handle, uint16_t cid) = 0;
++  virtual size_t stats(char* bytes, size_t capacity) = 0;
++  virtual void wake() = 0;
++  virtual void schedule(uint32_t delay_ms, bool enabled) = 0;
++};
++
++class Server {
++ public:
++  static constexpr uint16_t kDataPsm = 0x80;
++  static constexpr uint16_t kControlPsm = 0x81;
++  explicit Server(Port& port, uint8_t channels) : port_(port), count_(channels) {}
++  Server(const Server&) = delete;
++  Server& operator=(const Server&) = delete;
++
++  // Single BLE-task producer. RX bytes stay in their returned, unposted buffer;
++  // completion flags are independent of bounded setup mailboxes and never lost
++  // because a general event queue is full. No callback allocation or waiting.
++  void event(const ble_evt_t& event) {
++    const uint16_t type = event.header.evt_id;
++    if (type == BLE_GAP_EVT_DISCONNECTED) {
++      for (unsigned i = 0; i < count_ && i < 2; ++i) {
++        const uint32_t bound = load(ch_[i].binding);
++        if (bound != kUnbound && uint16_t(bound >> 16) == event.evt.gap_evt.conn_handle)
++          signal(ch_[i], kReleased);
++      }
++      port_.wake(); return;
++    }
++    if (type < BLE_L2CAP_EVT_CH_SETUP_REQUEST || type > BLE_L2CAP_EVT_CH_TX) return;
++    const auto& e = event.evt.l2cap_evt;
++    if (type == BLE_L2CAP_EVT_CH_SETUP_REQUEST) {
++      const auto& request = e.params.ch_setup_request;
++      const int index = role(request.le_psm);
++      if (index < 0) { reject(e.conn_handle, e.local_cid, BLE_L2CAP_CH_STATUS_CODE_LE_PSM_NOT_SUPPORTED); return; }
++      Channel& c = ch_[index];
++      uint8_t empty = 0;
++      if (load(c.binding) != kUnbound || !__atomic_compare_exchange_n(&c.request_state,
++          &empty, uint8_t(1), false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
++        reject(e.conn_handle, e.local_cid, BLE_L2CAP_CH_STATUS_CODE_NO_RESOURCES); return;
++      }
++      c.request_handle = e.conn_handle; c.request_cid = e.local_cid;
++      c.request_mtu = request.tx_params.tx_mtu;
++      __atomic_store_n(&c.request_state, uint8_t(2), __ATOMIC_RELEASE);
++      port_.wake(); return;
++    }
++    const uint32_t binding = (uint32_t(e.conn_handle) << 16) | e.local_cid;
++    for (unsigned i = 0; i < count_ && i < 2; ++i) {
++      Channel& c = ch_[i];
++      if (load(c.binding) != binding) continue;
++      switch (type) {
++        case BLE_L2CAP_EVT_CH_SETUP:
++          __atomic_store_n(&c.mtu, e.params.ch_setup.tx_params.tx_mtu, __ATOMIC_RELAXED);
++          signal(c, kSetup); break;
++        case BLE_L2CAP_EVT_CH_SETUP_REFUSED:
++        case BLE_L2CAP_EVT_CH_RELEASED: signal(c, kReleased); break;
++        case BLE_L2CAP_EVT_CH_CREDIT: signal(c, kCredit); break;
++        case BLE_L2CAP_EVT_CH_RX:
++          if (e.params.rx.sdu_buf.p_data != c.rx || __atomic_load_n(&c.rx_state, __ATOMIC_ACQUIRE) != 1) {
++            signal(c, kFault); break;
++          }
++          __atomic_store_n(&c.rx_length, e.params.rx.sdu_len, __ATOMIC_RELAXED);
++          __atomic_store_n(&c.rx_available, e.params.rx.sdu_buf.len, __ATOMIC_RELAXED);
++          __atomic_store_n(&c.rx_state, uint8_t(2), __ATOMIC_RELEASE); break;
++        case BLE_L2CAP_EVT_CH_TX: returned(c, e.params.tx.sdu_buf.p_data, false); break;
++        case BLE_L2CAP_EVT_CH_SDU_BUF_RELEASED:
++          returned(c, e.params.ch_sdu_buf_released.sdu_buf.p_data, true); break;
++        default: break;
++      }
++      port_.wake(); return;
++    }
++  }
++
++  template <typename Queue, typename Fragment = RecordFragment>
++  void service(Queue* queue, uint64_t nonce, uint32_t now) {
++    if (count_ != 1 && count_ != 2) return;
++    processReturns(now);
++    if (active_ && port_.authorizes(handle_) != BLE_L2CAP_CH_STATUS_CODE_SUCCESS) close();
++    if (closing_) cleanup();
++    for (unsigned i = 0; i < count_; ++i) {
++      Channel& c = ch_[i];
++      if (__atomic_load_n(&c.request_state, __ATOMIC_ACQUIRE) != 2) continue;
++      const uint16_t handle = c.request_handle, cid = c.request_cid, mtu = c.request_mtu;
++      __atomic_store_n(&c.request_state, uint8_t(0), __ATOMIC_RELEASE);
++      uint32_t status = port_.authorizes(handle);
++      if (!queue || !nonce || closing_ || load(c.binding) != kUnbound)
++        status = BLE_L2CAP_CH_STATUS_CODE_NO_RESOURCES;
++      if (mtu < kSduBytes) status = BLE_L2CAP_CH_STATUS_CODE_UNACCEPTABLE_PARAMS;
++      if (status != BLE_L2CAP_CH_STATUS_CODE_SUCCESS) { reject(handle, cid, status); continue; }
++      if (!active_) {
++        uint64_t session = delivery_.pending() ? delivery_.session() : nonce;
++        Fragment head;
++        if (!delivery_.pending() && queue->peek(head, 1)) session = head.boot_nonce;
++        if (!session || generation_ == UINT32_MAX || !delivery_.open(++generation_)) {
++          reject(handle, cid, BLE_L2CAP_CH_STATUS_CODE_NO_RESOURCES); continue;
++        }
++        active_ = true; handle_ = handle; session_ = session; started_ = now;
++      }
++      if (handle != handle_) { reject(handle, cid, BLE_L2CAP_CH_STATUS_CODE_INSUFF_AUTHORIZATION); continue; }
++      c.setup = c.ready = c.hello = c.terminal = c.release_requested = false;
++      __atomic_store_n(&c.rx_state, uint8_t(1), __ATOMIC_RELEASE);
++      __atomic_store_n(&c.binding, (uint32_t(handle) << 16) | cid, __ATOMIC_RELEASE);
++      uint16_t accepted_cid = cid;
++      if (port_.accept(handle, accepted_cid, c.rx, kSduBytes) != NRF_SUCCESS || accepted_cid != cid) {
++        __atomic_store_n(&c.rx_state, uint8_t(0), __ATOMIC_RELEASE);
++        __atomic_store_n(&c.binding, kUnbound, __ATOMIC_RELEASE); close();
++      }
++    }
++    if (active_ && !closing_) {
++      if (!ready() && uint32_t(now - started_) >= 10000) { ++timeouts_; close(); }
++      if (control_pending_ && uint32_t(now - control_started_) >= 15000) { ++timeouts_; close(); }
++      if (request_id_ && !control_pending_ && uint32_t(now - request_started_) >= 15000) { ++timeouts_; close(); }
++      if (delivery_.poll(now) == Action::Close) { ++timeouts_; close(); }
++    }
++    if (active_ && !closing_) {
++      for (unsigned i = 0; i < count_; ++i) {
++        Channel& c = ch_[i];
++        if (c.setup && !c.hello && !control_pending_) {
++          const uint8_t limit[] = {0x20, 2};
++          queueControl(i, Kind::Hello, 0, limit, sizeof(limit), now);
++        }
++        if (__atomic_load_n(&c.rx_state, __ATOMIC_ACQUIRE) == 2) processRx(i, now);
++      }
++      if (!closing_ && ready() && queue && !delivery_.pending()) {
++        Fragment head;
++        if (queue->peek(head, 1)) {
++          if (head.boot_nonce != session_) close();
++          else if (!delivery_.load(*queue)) fail();
++        }
++      }
++      if (!closing_) {
++        sendControl(now);
++        if (ready() && delivery_.ready(now) && (!control_pending_ || count_ == 2) &&
++            !__atomic_load_n(&ch_[0].control_owned, __ATOMIC_ACQUIRE)) {
++          __atomic_store_n(&data_pointer_, reinterpret_cast<uintptr_t>(delivery_.data()), __ATOMIC_RELEASE);
++          __atomic_store_n(&ch_[0].data_owned, uint8_t(1), __ATOMIC_RELEASE);
++          const uint32_t result = port_.send(handle_, cid(0), delivery_.data(), delivery_.size());
++          if (result == NRF_SUCCESS) {
++            if (!delivery_.submitAccepted(generation_, now)) fail();
++          } else {
++            __atomic_store_n(&ch_[0].data_owned, uint8_t(0), __ATOMIC_RELEASE);
++            if (result == NRF_ERROR_RESOURCES || result == NRF_ERROR_BUSY) delivery_.resourcesBusy(generation_, now);
++            else fail();
++          }
++        }
++      }
++    }
++    if (closing_) { releaseChannels(); cleanup(); }
++    uint32_t delay = 0; const bool timer = nextDelay(now, delay);
++    port_.schedule(delay, timer);
++  }
++
++  bool takeCommand(char* out, size_t capacity) {
++    if (!command_ready_ || !out || capacity <= command_length_ || closing_) return false;
++    memcpy(out, command_, command_length_ + 1); command_ready_ = false; return true;
++  }
++  bool reply(const uint8_t* bytes, size_t length, uint32_t now) {
++    if (!active_ || closing_ || !request_id_ || command_ready_ || control_pending_ ||
++        port_.authorizes(handle_) != BLE_L2CAP_CH_STATUS_CODE_SUCCESS) return false;
++    static const uint8_t empty[] = "(no output)";
++    return queueControl(controlRole(), Kind::Reply, request_id_, length ? bytes : empty,
++                        length ? length : sizeof(empty)-1, now);
++  }
++  void close() {
++    if (!active_) return;
++    closing_ = true; command_ready_ = false; request_id_ = 0; delivery_.close();
++    if (!control_busy_) { control_pending_ = false; memset(control_, 0, sizeof(control_)); }
++  }
++  bool ready() const {
++    return active_ && !closing_ && ch_[0].ready && (count_ == 1 || ch_[1].ready);
++  }
++  bool pending() const { return delivery_.pending(); }
++  uint32_t rejected() const { return __atomic_load_n(&rejected_, __ATOMIC_ACQUIRE); }
++  uint32_t faults() const { return faults_; }
++  uint32_t timeouts() const { return timeouts_; }
++
++  bool runnable(uint32_t now) const {
++    for (unsigned i = 0; i < count_ && i < 2; ++i)
++      if (__atomic_load_n(&ch_[i].request_state, __ATOMIC_ACQUIRE) == 2 || load(ch_[i].flags) ||
++          __atomic_load_n(&ch_[i].rx_state, __ATOMIC_ACQUIRE) == 2) return true;
++    if (closing_) return false;
++    return (ready() && delivery_.ready(now)) || (control_pending_ && !control_busy_ && control_retry_);
++  }
++
++ private:
++  static constexpr uint32_t kUnbound = UINT32_MAX;
++  enum Flags : uint32_t { kSetup=1, kReleased=2, kCredit=4, kDataReturn=8, kControlReturn=16, kFault=32 };
++  struct Channel {
++    volatile uint32_t binding = kUnbound, flags = 0;
++    volatile uint16_t mtu = 0, rx_length = 0, rx_available = 0;
++    volatile uint8_t rx_state = 0, data_owned = 0, control_owned = 0, request_state = 0;
++    uint16_t request_handle = 0, request_cid = 0, request_mtu = 0;
++    bool setup=false, ready=false, hello=false, terminal=false, release_requested=false;
++    uint8_t rx[kSduBytes]{};
++  };
++  static uint32_t load(const volatile uint32_t& value) { return __atomic_load_n(&value, __ATOMIC_ACQUIRE); }
++  static void signal(Channel& c, uint32_t flag) { __atomic_fetch_or(&c.flags, flag, __ATOMIC_RELEASE); }
++  unsigned controlRole() const { return count_ == 2 ? 1 : 0; }
++  int role(uint16_t psm) const {
++    if (count_ != 1 && count_ != 2) return -1;
++    if (psm == kDataPsm) return 0;
++    return count_ == 2 && psm == kControlPsm ? 1 : -1;
++  }
++  uint16_t cid(unsigned role) const { return uint16_t(load(ch_[role].binding)); }
++  void reject(uint16_t handle, uint16_t cid, uint16_t status) {
++    __atomic_fetch_add(&rejected_, 1U, __ATOMIC_RELAXED); port_.refuse(handle, cid, status);
++  }
++  void fail() { ++faults_; close(); }
++
++  void returned(Channel& c, uint8_t* pointer, bool released) {
++    if (pointer == c.rx) {
++      if (__atomic_exchange_n(&c.rx_state, uint8_t(0), __ATOMIC_ACQ_REL) != 1) signal(c, kFault);
++    } else if (pointer == control_) {
++      if (__atomic_exchange_n(&c.control_owned, uint8_t(0), __ATOMIC_ACQ_REL) != 1) signal(c, kFault);
++      else signal(c, kControlReturn);
++    } else if (reinterpret_cast<uintptr_t>(pointer) == __atomic_load_n(&data_pointer_, __ATOMIC_ACQUIRE)) {
++      if (__atomic_exchange_n(&c.data_owned, uint8_t(0), __ATOMIC_ACQ_REL) != 1) signal(c, kFault);
++      else signal(c, kDataReturn);
++    } else signal(c, kFault);
++    if (released) signal(c, kFault); // Return ownership, then terminate the logical generation.
++  }
++
++  void processReturns(uint32_t now) {
++    for (unsigned i = 0; i < count_; ++i) {
++      Channel& c = ch_[i]; const uint32_t flags = __atomic_exchange_n(&c.flags, 0U, __ATOMIC_ACQ_REL);
++      if (flags & kDataReturn) {
++        if (!delivery_.returned(generation_, reinterpret_cast<const uint8_t*>(__atomic_load_n(&data_pointer_, __ATOMIC_ACQUIRE)), now)) fail();
++      }
++      if (flags & kControlReturn) {
++        control_busy_ = control_pending_ = false; control_retry_ = true;
++        if (control_kind_ == Kind::Reply || control_kind_ == Kind::StatsReply) request_id_ = 0;
++        memset(control_, 0, sizeof(control_));
++      }
++      if (flags & kReleased) { c.terminal = true; close(); }
++      if (flags & kSetup) {
++        c.setup = true;
++        if (__atomic_load_n(&c.mtu, __ATOMIC_ACQUIRE) < kSduBytes) fail();
++        if (closing_) c.release_requested = false;
++      }
++      if (flags & kCredit) { control_retry_ = true; delivery_.resourcesAvailable(generation_); }
++      if (flags & kFault) fail();
++    }
++  }
++
++  bool queueControl(unsigned index, Kind kind, uint32_t id, const uint8_t* bytes, size_t length, uint32_t now) {
++    if (control_pending_ || control_busy_) return false;
++    const size_t n = encode(kind, session_, id, bytes, length, control_, sizeof(control_));
++    if (!n) { fail(); return false; }
++    control_length_ = n; control_target_ = index; control_kind_ = kind;
++    control_pending_ = control_retry_ = true; control_started_ = now; return true;
++  }
++  void sendControl(uint32_t now) {
++    if (!control_pending_ || control_busy_ || !control_retry_ || !ch_[control_target_].setup ||
++        (control_target_ == 0 && delivery_.vendorOwned())) return;
++    Channel& c = ch_[control_target_];
++    control_busy_ = true;
++    __atomic_store_n(&c.control_owned, uint8_t(1), __ATOMIC_RELEASE);
++    const uint32_t result = port_.send(handle_, cid(control_target_), control_, control_length_);
++    if (result == NRF_SUCCESS) {
++      if (control_kind_ == Kind::Hello) c.hello = true;
++    } else {
++      __atomic_store_n(&c.control_owned, uint8_t(0), __ATOMIC_RELEASE); control_busy_ = false;
++      if (result == NRF_ERROR_RESOURCES || result == NRF_ERROR_BUSY) control_retry_ = false;
++      else fail();
++    }
++    (void)now;
++  }
++
++  void processRx(unsigned index, uint32_t now) {
++    Channel& c = ch_[index];
++    const uint16_t n = __atomic_load_n(&c.rx_length, __ATOMIC_ACQUIRE);
++    const uint16_t available = __atomic_load_n(&c.rx_available, __ATOMIC_ACQUIRE);
++    Packet packet;
++    if (n > available || n > kSduBytes || !decode(c.rx, n, Direction::ToDevice, packet) || packet.session != session_) {
++      fail(); return;
++    }
++    if (!c.ready) {
++      if (packet.kind != Kind::Ready || !c.hello) { fail(); return; }
++      c.ready = true;
++    } else {
++      if (count_ == 2 && index != controlRole()) { fail(); return; }
++      if (packet.kind == Kind::Receipt) {
++        delivery_.receipt(generation_, packet.session, packet.id);
++      } else if (packet.kind == Kind::Command || packet.kind == Kind::StatsRequest) {
++        if (control_pending_ || request_id_) return; // Hold unposted RX until bounded output capacity returns.
++        if (packet.id <= last_request_id_) { fail(); return; }
++        last_request_id_ = request_id_ = packet.id; request_started_ = now;
++        if (packet.kind == Kind::StatsRequest) {
++          char value[128]{}; const size_t length = port_.stats(value, sizeof(value));
++          if (!length || length >= sizeof(value)) { fail(); return; }
++          queueControl(controlRole(), Kind::StatsReply, request_id_, reinterpret_cast<uint8_t*>(value), length, now);
++        } else {
++          memcpy(command_, packet.payload, packet.length); command_[packet.length] = 0;
++          uint32_t epoch = 0;
++          if (!isAllowedReadCommand(command_) && !parseCanonicalEpoch(command_, epoch)) { fail(); return; }
++          command_length_ = packet.length; command_ready_ = true;
++        }
++      } else { fail(); return; }
++    }
++    __atomic_store_n(&c.rx_state, uint8_t(1), __ATOMIC_RELEASE);
++    if (port_.receive(handle_, cid(index), c.rx, kSduBytes) != NRF_SUCCESS) {
++      __atomic_store_n(&c.rx_state, uint8_t(0), __ATOMIC_RELEASE); fail();
++    }
++  }
++
++  void releaseChannels() {
++    for (unsigned i = 0; i < count_; ++i) {
++      Channel& c = ch_[i];
++      if (load(c.binding) != kUnbound && !c.terminal && !c.release_requested) {
++        c.release_requested = true; port_.release(handle_, cid(i));
++      }
++    }
++  }
++  void cleanup() {
++    if (!closing_) return;
++    bool all = true;
++    for (unsigned i = 0; i < count_; ++i) {
++      Channel& c = ch_[i];
++      if (load(c.binding) == kUnbound) continue;
++      if (!c.terminal || __atomic_load_n(&c.rx_state, __ATOMIC_ACQUIRE) == 1 ||
++          __atomic_load_n(&c.data_owned, __ATOMIC_ACQUIRE) || __atomic_load_n(&c.control_owned, __ATOMIC_ACQUIRE)) { all = false; continue; }
++      if (delivery_.vendorOwned() || control_busy_) { all = false; continue; }
++      __atomic_store_n(&c.rx_state, uint8_t(0), __ATOMIC_RELEASE);
++      __atomic_store_n(&c.binding, kUnbound, __ATOMIC_RELEASE);
++      c.setup = c.ready = c.hello = c.terminal = c.release_requested = false;
++    }
++    if (all) {
++      active_ = closing_ = false; control_pending_ = control_busy_ = command_ready_ = false;
++      request_id_ = last_request_id_ = 0; memset(control_, 0, sizeof(control_));
++    }
++  }
++  bool nextDelay(uint32_t now, uint32_t& delay) const {
++    if (!active_ || closing_) return false;
++    delay = 15000; bool needed = false;
++    auto add = [&](uint32_t start, uint32_t interval) {
++      const uint32_t elapsed = now - start;
++      const uint32_t remaining = elapsed >= interval ? 0 : interval - elapsed;
++      if (!needed || remaining < delay) delay = remaining;
++      needed = true;
++    };
++    if (!ready()) add(started_, 10000);
++    if (control_pending_) add(control_started_, 15000);
++    if (request_id_ && !control_pending_) add(request_started_, 15000);
++    uint32_t data = 0;
++    if (delivery_.wakeDelay(now, data)) { if (!needed || data < delay) delay = data; needed = true; }
++    return needed;
++  }
++
++  Port& port_;
++  Channel ch_[2];
++  Delivery delivery_;
++  uint8_t control_[kSduBytes]{};
++  char command_[96]{};
++  volatile uintptr_t data_pointer_ = 0;
++  volatile uint32_t rejected_ = 0;
++  uint64_t session_ = 0;
++  uint32_t generation_=0, started_=0, control_started_=0, request_started_=0;
++  uint32_t request_id_=0, last_request_id_=0, faults_=0, timeouts_=0;
++  uint16_t handle_=0, control_length_=0;
++  uint8_t count_=0, control_target_=0, command_length_=0;
++  Kind control_kind_ = Kind::Hello;
++  bool active_=false, closing_=false, control_pending_=false, control_busy_=false;
++  bool control_retry_=true, command_ready_=false;
++};
++
++}  // namespace coc
++}  // namespace observer

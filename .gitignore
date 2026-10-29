@@ -1,9 +1,3 @@
 out/
-.venv/
 __pycache__/
 .pytest_cache/
-.superpowers/
-private-backups/
-*.gpg
-*.pcap
-*.log

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "version": "v1.18.0-coc",
+  "environment": "SenseCap_Solar_repeater_observer",
+  "upstream_commit": "81dbae592ffad40b4212bc0b37e82b38da08f4bc",
+  "patches": [
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0001-sensecap-observer-ble.patch", "sha256": "95f506fda08f2edfad2a45dd7510461379e74a1ae51d0bb8a1db88898192e8e1"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0002-sensecap-observer-environment.patch", "sha256": "971f3b4016f2b173b076db9e36763a40fa2dd0c7394797c883c28d54209e1ac9"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0003-observer-boot-startup.patch", "sha256": "721d57aaf5db9b40c1386798845e681671086ac1e1955668faff7e2960e044ec"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0004-notify-retry-regressions.patch", "sha256": "bff939fe9c4c08d569e5c572860d520234c1844cabf2a7781b72c3f37b8963ea"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0005-retain-unsent-fragment.patch", "sha256": "04dcff081bdf9e056d86177435eb7c3920b6de2872c55280091b3b851c4d2eb1"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0006-ota-entry-and-normal-led.patch", "sha256": "cfcc10b6becb5cc3214858118385cb8a956e2bbc4a2b57dda4ba83d65dc0929b"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0007-mtu-sized-notifications.patch", "sha256": "087ef970c4acac0f3c69240a30ddeaf23f7471365b356a95afe7daccda05c758"},
+    {"path": "firmware/observer-lines544-release/observer-patch-v1.18.0/0008-lossless-raw-records.patch", "sha256": "3d3e6644dd307f645c14edcbf4feb036f10c9ce649943e9d5738d6a4c6f6e610"},
+    {"path": "firmware/observer-coc-experimental/selected-544-runtime.patch", "sha256": "438627d071933ebbad8ef331f5be51f6f644781eb565fd68b98d94c26b6e2e25"}
+  ],
+  "build_inputs": {
+    "packages/framework-arduinoadafruitnrf52": "6dd71ba93a5e79f6588a3c8262d0d3fe8bf71324956a38f3e8566b2a6cd9f154",
+    "packages/framework-cmsis": "48f9b458d08d3c8e331c35e65d6e6118cd9fe429f3010b3690019d1ba249a165",
+    "packages/toolchain-gccarmnoneeabi": "37eab5a2a3c9ffc03ceadf18f05bc6db990d7c16019c70d7f8c0553c07b98c39",
+    "packages/tool-adafruit-nrfutil": "4151d1e23f018fb3d4b201d1d7ad73393ee07812d903d06453ac52a02845c61b",
+    "packages/tool-sreccat": "8d98e4de5608d844fcec48c2e681f323d80d18b37f69e231831212c4ddcdf198",
+    "packages/tool-scons": "99c12a772e4546ef54a3e0a7a703c7446c6e7830b3bb909ceb60af093016f98c",
+    "platforms/nordicnrf52": "a931f5f9cd6badd8f9e259134f6216063f051271007f69e6d8c2fcc206c72f2b",
+    "pio-venv": "cda89f461811fdbfc03fd98c253657c04aa7e0271bb572dbd4f94f4150b8b452"
+  },
+  "framework": {
+    "path": "libraries/Bluefruit52Lib/src/bluefruit.cpp",
+    "original_sha256": "e0948ab89ce44748e26d5fd950caa9bafb00da78e16fcc6e77f84a38cfd798f6",
+    "patch": "firmware/observer-coc-experimental/bluefruit-pre-enable.patch",
+    "patch_sha256": "517d4e531db261cc81e81ed23d25a87e9f30a17846ea7846ed5efdcad8928d28"
+  }
+}
