@@ -33,12 +33,10 @@ Select `general.transport = "coc"`; USB serial remains the host's default.
 The repeater clock may need restoring after reboot. With `sync_time = true`, the
 host sets UTC on connection after checking its own clock synchronization.
 
-## Status and limits
+## Status
 
-The transport has been used on one P1-Pro/Linux setup. The October 29 download is
-a newer build than the firmware installed during that testing. Broader hardware
-support, power use, RF coexistence, and long-term reliability still need testing.
-Records are buffered in RAM; a receipt does not guarantee storage or MQTT delivery.
+I've been running the CoC firmware on a P1-Pro with a Linux host since October 28.
+Battery use looks normal so far. Other boards have not been tested.
 
 ## Build from source
 
